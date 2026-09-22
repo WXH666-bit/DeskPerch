@@ -1,5 +1,6 @@
 #pragma once
 #include "hidpp.h"
+#include "langtu.h"
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -20,6 +21,7 @@ class DeviceService {
         std::shared_ptr<HidChannel> channel;
         std::map<unsigned, std::unique_ptr<LogitechMouse>> mice;
         Reading battery;
+        LangtuMouse langtu;
     };
     struct Job {
         Device device;

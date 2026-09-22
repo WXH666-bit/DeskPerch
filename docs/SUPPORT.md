@@ -1,12 +1,13 @@
 # 设备支持 / Device support
 
-狼途 / LANGTU：照片已确认型号为 M8 MAX，并已找到官网链接的 M8 网页驱动及电量/DPI 查询逻辑。目前实物尚未接入，设备标识和回复结构仍待核对，尚未启用该私有协议。[适配调查记录](LANGTU-M8.md)。通用 HID/BLE 路径仍可用于符合相应标准的设备。
+狼途 / LANGTU：借用的 M8 MAX 已实测，启用 `A8A5:2255`、`LTM8 2.4G` 的只读电量／DPI 查询。已验证电源关闭后的无效 DPI 保护和开机切档读数变化，不显示接收器缓存电量。充电标志、有线／蓝牙及其他型号未验证。[适配调查记录](LANGTU-M8.md)。
 
-The photo identifies M8 MAX. The official M8 web driver's read queries have been located; hardware identity and response validation are still pending before enabling its private protocol. Generic HID/BLE paths remain brand-independent.
+The borrowed M8 MAX receiver (`A8A5:2255`, `LTM8 2.4G`) has been hardware-tested for battery, active DPI and powered-off invalid replies. Charging, wired/Bluetooth modes and other models remain unverified. Generic HID/BLE paths remain brand-independent.
 
 | Provider | Coverage |
 | --- | --- |
 | Logitech HID++ | Read-only device name, battery and active DPI. Tested with a LIGHTSPEED receiver and PRO X Wireless. Other models require verification. |
+| LANGTU M8 MAX | Exact verified 2.4G receiver only. Read-only percentage and active DPI; powered-off invalid configuration suppresses cached battery. Mouse keyboard collection is excluded. No write/configuration commands. |
 | DPI | `0x2201` and `0x2202`; the latter has parser tests but no corresponding hardware validation. Zero is not replaced with a preset. |
 | Battery | HID++ `0x1004` / `0x1000`, explicitly defined 0–100 HID Feature Reports and paired Bluetooth Battery Service. Standard HID/BLE need additional hardware testing. |
 | Keyboard | Physical external PnP devices, with duplicate HID collections merged. Receiver/pairing presence alone does not establish that a wireless keyboard is online. |

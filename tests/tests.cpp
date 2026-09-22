@@ -1,6 +1,7 @@
 #include "model.h"
 #include "hidpp.h"
 #include "tray_menu.h"
+#include "langtu.h"
 #include <iostream>
 #include <stdexcept>
 using namespace dp;
@@ -188,6 +189,40 @@ int main() {
         check(!publishMouseResults(publication, physical.root, {fresh}, true, 2, 2) &&
                   publication.devices.at(fresh.id).dpi.value == L"800",
               "removed root cannot resurrect late data");
+        // Captured M8 MAX 2.4G payloads, excluding the Windows report ID.
+        std::array<uint8_t, 64> ltBattery{0xaa, 0x30, 0xa5, 0x0b, 0x0a, 1, 1, 1, 76, 0};
+        std::array<uint8_t, 64> ltDpi{0xaa, 0x0e, 0xa5, 0x57, 0x2e, 1, 1,    1,    0,    1,    2, 6,   3,
+                                      0x20, 3,    0x40, 6,    0x60, 9, 0x80, 0x0c, 0x88, 0x13, 0, 0x19};
+        check(decodeLangtuBattery(ltBattery) == 76u && decodeLangtuDpi(ltDpi) == 2400u,
+              "M8 MAX captured live values");
+        auto ltOff = ltDpi;
+        ltOff[3] = 0x2b;
+        std::fill(ltOff.begin() + 13, ltOff.begin() + 25, uint8_t{0xff});
+        check(!decodeLangtuDpi(ltOff), "M8 MAX powered off reply never exposes fallback DPI");
+        check(!decodeLangtuDpi(std::span(ltDpi).first(24)) && !decodeLangtuDpi(ltBattery),
+              "M8 rejects short and wrong command replies");
+        ltDpi[12] = 0;
+        check(!decodeLangtuDpi(ltDpi), "M8 rejects zero index");
+        ltDpi[12] = 7;
+        check(!decodeLangtuDpi(ltDpi), "M8 rejects out of range index");
+        ltDpi[12] = 4;
+        check(decodeLangtuDpi(ltDpi) == 3200u, "M8 selects active hardware preset");
+        ltDpi[11] = 7;
+        check(!decodeLangtuDpi(ltDpi), "M8 rejects too many presets");
+        ltBattery[8] = 0;
+        check(decodeLangtuBattery(ltBattery) == 0u, "M8 actual zero battery is valid");
+        ltBattery[8] = 101;
+        check(!decodeLangtuBattery(ltBattery), "M8 rejects invalid percent");
+        ltBattery[8] = 76;
+        ltBattery[1] = 0xfa;
+        check(!decodeLangtuBattery(ltBattery), "M8 ignores unsolicited status frame");
+        Device ltDevice;
+        ltDevice.vendor = 0xa8a5;
+        ltDevice.product = 0x2255;
+        ltDevice.name = L"LTM8 2.4G";
+        check(supportedLangtu(ltDevice), "M8 exact receiver allowlist");
+        ltDevice.product = 0x2256;
+        check(!supportedLangtu(ltDevice), "M8 does not enable other vendor devices");
         TrayMenuActions popup;
         Settings choices;
         auto populate = [&] {

@@ -1,5 +1,13 @@
 # 多设备版本验证 / Multi-device validation
 
+## 后续：狼途 M8 MAX 实机适配（2026-09-22）
+
+借用鼠标通过 `A8A5:2255 / LTM8 2.4G` 接入。初次只读查询为 76%、2400 DPI；用户关闭底部电源后，接收器仍回复 75%，DPI 六档为全 FF，因此适配拒绝无效配置并撤下所有数值。用户开机切档后捕获 800 DPI，正式采集器随后读取 72%、1600 DPI。替换本机 EXE 后的实际挂件渲染为 79%、1600 DPI，无多余键盘行，配置文件保持不变。电量为固件上报值，开关机前后有波动，未作平滑或推算。
+
+Release 编译和 core/layout 测试通过，新增正常帧、关机全 FF、短帧、错误命令／通知、非法档位及电量范围测试。未验证有线／蓝牙、充电、厂商工具并行、多鼠标及长时间资源表现；旧版资源采样不代表此次新增适配的实测结果。
+
+Borrowed M8 MAX 2.4G hardware passed read-query and physical DPI-change checks. Powered-off receiver battery replies must not establish online status; invalid DPI configuration suppresses the readings. The running widget was updated and rendered successfully with unchanged preferences. Wired/Bluetooth, charging, concurrent vendor software and long-duration resource checks remain pending.
+
 ## 后续：锁定重启位置修复
 
 保留用户保存的位置锚点，不再用加载文字变宽后的临时边界调整覆盖它；数据恢复后重新从锚点计算位置，模式切换不重写锚点。拖动中暂停自动重定位，松开后保存用户位置。

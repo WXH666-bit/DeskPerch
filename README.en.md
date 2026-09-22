@@ -40,7 +40,9 @@ Target: Windows 11 24H2/25H2 x64. Actual hardware testing has used Windows 11 25
 
 Unknown battery is never 0%; pointer speed or presets never replace real DPI. Enabled display paths do not imply physical power. USB port numbers may differ from case labels.
 
-Other brands use standard HID Feature / Bluetooth BAS percentage reports; unverified DPI protocols remain unsupported. Only positively identified batteryless wired models display `-`; USB attachment alone is not proof. See the support table.
+Logitech HID++ and the hardware-tested LANGTU M8 MAX 2.4G receiver (`A8A5:2255`, `LTM8 2.4G`) support actual battery and active DPI queries. The LANGTU receiver may return battery data while the mouse is powered off; invalid DPI responses suppress those cached values and show unavailable. Wired/Bluetooth modes and other LANGTU models remain unverified.
+
+Other devices use standard HID Feature / Bluetooth BAS percentage reports; unverified DPI protocols remain unsupported. Only positively identified batteryless wired models display `-`; USB attachment alone is not proof. See the support table.
 
 Configuration v3 migrates v1/v2 attention filters to automatic mode while keeping appearance, position, locking, visibility and layout. Subsequent starts restore multiple selections and offline names.
 

@@ -168,7 +168,7 @@ Inventory enumerateInputs() {
             return;
         // Battery feature reports may live in a different top-level collection.
         related[d.root].push_back(d.path);
-        if (caps.UsagePage >= 0xff00 && d.vendor == 0x046d)
+        if (caps.UsagePage >= 0xff00 && (d.vendor == 0x046d || (d.vendor == 0xa8a5 && d.product == 0x2255)))
             r.controls.push_back(d);
         if (caps.UsagePage != 1)
             return;
@@ -221,7 +221,7 @@ Inventory enumerateInputs() {
         // Shared receivers can contain a real keyboard. Suppress only the
         // verified mouse receiver or a wired mouse's extra keyboard collection.
         auto label = lower(k.name);
-        if (!(k.vendor == 0x046d && k.product == 0xc547) &&
+        if (!supportedLangtu(k) && !(k.vendor == 0x046d && k.product == 0xc547) &&
             batteryKind(k, Reading::unavailable()) != BatteryKind::None &&
             (k.receiver ||
              (label.find(L"mouse") == std::wstring::npos && label.find(L"鼠标") == std::wstring::npos)))
@@ -799,6 +799,8 @@ void DeviceService::collect() {
                 d.dpi = Reading::unavailable(State::Unsupported, L"no verified DPI protocol");
                 if (connection.state == State::Disconnected || connection.state == State::Unavailable)
                     d.battery = d.dpi = connection;
+                else if (supportedLangtu(mouse))
+                    ctx.langtu.poll(mouse, job.controls, stop_.get(), d);
                 else {
                     if (!ctx.batteryAt || now() - ctx.batteryAt >= 60000) {
                         ctx.battery = standardBattery(mouse);
