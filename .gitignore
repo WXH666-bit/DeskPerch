@@ -1,0 +1,14 @@
+/build/
+/out/
+/artifacts/
+/dist/
+/docs/ACCEPTANCE.md
+/docs/PERFORMANCE.md
+/docs/DEVICES.md
+/.vs/
+*.user
+*.log
+*.pdb
+.env
+.env.*
+*.tmp
