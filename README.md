@@ -54,7 +54,7 @@
 
 ```powershell
 .\build.ps1
-.\tools\package.ps1 -Version v1.0.0
+.\tools\package.ps1 -Version v1.1.0
 ```
 
 构建脚本运行 CTest 并输出 `out/DeskPerch.exe`，重新构建前请先退出该 EXE。打包脚本向 `dist` 输出便携 ZIP、独立 EXE 和 SHA-256 校验文件。静态链接 MSVC 运行库，只依赖 Windows 系统 DLL。
@@ -66,8 +66,8 @@
 推送 `main`、提交 PR 或手动运行工作流时，会编译、测试并保存打包产物。推送 `vX.Y.Z` 标签后，测试通过即自动创建 Release，上传便携 ZIP、独立 EXE 和 `SHA256SUMS.txt`。
 
 ```powershell
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.1.0
+git push origin v1.1.0
 ```
 
 发布使用 GitHub 自带的 `GITHUB_TOKEN`，无需额外令牌。后续版本使用新标签，工作流不覆盖已发布的同名附件。校验文件覆盖上传的二进制和 ZIP；源代码压缩包由 GitHub 另外生成。
