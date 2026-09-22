@@ -2,6 +2,7 @@
 #include "devices.h"
 #include "render.h"
 #include "settings.h"
+#include "tray_menu.h"
 #include <shellapi.h>
 #include <dbt.h>
 #include <wtsapi32.h>
@@ -19,7 +20,8 @@ enum Command : UINT {
     Reset,
     Exit,
     BackgroundClear = 111,
-    BackgroundWhite
+    BackgroundWhite,
+    ShowMenu
 };
 class App {
     HINSTANCE instance_;
@@ -49,7 +51,8 @@ class App {
         c.scroll = scroll_;
         return c;
     }
-    std::vector<std::function<void()>> menuActions_;
+    TrayMenuActions menuActions_;
+    bool trayVersion4_ = false;
     bool active() const {
         return settings_.visible && !sessionLocked_ && !suspended_ && desktop_.valid() && tile_;
     }
@@ -82,7 +85,7 @@ class App {
         trayAdded_ = Shell_NotifyIconW(NIM_ADD, &tray_) != FALSE;
         if (trayAdded_) {
             tray_.uVersion = NOTIFYICON_VERSION_4;
-            Shell_NotifyIconW(NIM_SETVERSION, &tray_);
+            trayVersion4_ = Shell_NotifyIconW(NIM_SETVERSION, &tray_) != FALSE;
         }
     }
     static LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -175,6 +178,9 @@ class App {
     }
     void command(UINT id) {
         switch (id) {
+        case ShowMenu:
+            menu();
+            break;
         case BackgroundClear:
         case BackgroundWhite:
             settings_.background = static_cast<int>(id - BackgroundClear) + 1;
@@ -223,10 +229,6 @@ class App {
             DestroyWindow(owner_);
             break;
         default:
-            if (id >= 1000 && id - 1000 < menuActions_.size()) {
-                menuActions_[id - 1000]();
-                settingsChanged(true);
-            }
             break;
         }
     }
@@ -240,8 +242,7 @@ class App {
         return r;
     }
     void item(HMENU m, std::wstring name, bool checked, std::function<void()> action, bool radio = false) {
-        UINT id = 1000 + static_cast<UINT>(menuActions_.size());
-        menuActions_.push_back(std::move(action));
+        UINT id = menuActions_.add(std::move(action));
         auto label = menuText(std::move(name));
         AppendMenuW(m, MF_STRING | (checked ? MF_CHECKED : 0), id, label.c_str());
         if (radio) {
@@ -280,8 +281,8 @@ class App {
             AppendMenuW(m, MF_STRING | MF_DISABLED, 0, L"未发现可选择的外接设备");
     }
     void menu() {
-        sync(true);
-        menuActions_.clear();
+        if (!menuActions_.begin())
+            return;
         HMENU root = CreatePopupMenu();
         AppendMenuW(root, MF_STRING | (startupEnabled() ? MF_CHECKED : 0), Startup, L"开机自启动");
         AppendMenuW(root, MF_STRING | (settings_.compact ? MF_CHECKED : 0), Compact, L"简约显示");
@@ -317,12 +318,16 @@ class App {
         POINT p{};
         GetCursorPos(&p);
         SetForegroundWindow(owner_);
-        UINT selected = TrackPopupMenuEx(root, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, owner_, nullptr);
+        UINT selected =
+            TrackPopupMenuEx(root, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, p.x, p.y, owner_, nullptr);
         PostMessageW(owner_, WM_NULL, 0, 0);
         DestroyMenu(root);
-        if (selected)
+        auto action = menuActions_.finish(selected);
+        if (action) {
+            action();
+            settingsChanged(true);
+        } else if (selected && selected < 1000)
             command(selected);
-        menuActions_.clear();
     }
     LRESULT message(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (h == tile_) {
@@ -424,7 +429,7 @@ class App {
             return TRUE;
         }
         case trayMessage:
-            if (LOWORD(l) == WM_RBUTTONUP || LOWORD(l) == WM_CONTEXTMENU)
+            if (trayContextEvent(trayVersion4_, l))
                 menu();
             return 0;
         case DeviceService::updatedMessage: {
@@ -548,8 +553,8 @@ class App {
         wc.lpszClassName = L"DeskPerch.Card";
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         RegisterClassExW(&wc);
-        owner_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"DeskPerch.Owner", L"DeskPerch",
-                                 WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance_, this);
+        owner_ = CreateWindowExW(WS_EX_TOOLWINDOW, L"DeskPerch.Owner", L"DeskPerch", WS_POPUP, 0, 0, 0, 0,
+                                 nullptr, nullptr, instance_, this);
         if (!owner_)
             return 2;
         icon_ = trayIcon();
@@ -601,6 +606,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
         if (!owner)
             return 3;
         UINT cmd = action == L"background-clear"   ? BackgroundClear
+                   : action == L"menu"             ? ShowMenu
                    : action == L"background-white" ? BackgroundWhite
                    : action == L"exit"             ? Exit
                    : action == L"compact"          ? Compact

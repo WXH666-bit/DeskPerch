@@ -57,6 +57,10 @@ SHA-256: `36A4B32B8CC5BB3749E31BD7913E53B101D14CAAA0B1CFAA31A20BDD92CCB320`
 
 ## 操作回归 / Interaction regression
 
+2026-09-22 托盘选择修复：Release 构建及 core/layout 测试通过。新增覆盖菜单重入不覆盖点击动作、一次点击只执行一次、跨类别多选、取消菜单、取消最后选择恢复自动，以及选择的配置序列化恢复。按实际托盘版本分派右键事件，菜单打开时不再强制重扫设备。此次未完成真实鼠标操作托盘的端到端验证，待用户确认。
+
+Tray selection fix: Release build and core/layout tests pass, including reentrant popup protection, single dispatch, cross-category selection, cancellation, restoring automatic mode and configuration round-trip. Physical tray-click end-to-end verification remains pending.
+
 原生命令集成测试通过：重复启动保持单实例、模式切换保持左上角并收缩、隐藏/恢复、锁定持久化、退出进程消失及重启设置恢复。10 轮、60 次模式/可见性/锁定操作后，句柄 257 → 257；工作集 26.54 → 26.61 MiB，私有提交 6.08 → 6.07 MiB。操作阶段约 4.17 秒，平均 CPU 0.832%，不属于闲置采样。测试后恢复原显示模式、可见性与锁定状态。
 
 Native-command integration passed duplicate launch, anchoring/shrink, visibility, lock persistence, clean exit and restart checks. Ten cycles / sixty changes completed with unchanged handle count. This short stress run is not a long-term leak test; it does not simulate hardware hotplug or physical desktop input.

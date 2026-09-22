@@ -1,5 +1,6 @@
 #include "model.h"
 #include "hidpp.h"
+#include "tray_menu.h"
 #include <iostream>
 #include <stdexcept>
 using namespace dp;
@@ -187,6 +188,45 @@ int main() {
         check(!publishMouseResults(publication, physical.root, {fresh}, true, 2, 2) &&
                   publication.devices.at(fresh.id).dpi.value == L"800",
               "removed root cannot resurrect late data");
+        TrayMenuActions popup;
+        Settings choices;
+        auto populate = [&] {
+            check(popup.begin(), "start popup session");
+            popup.add([&] {
+                if (!choices.selected.erase(L"mouse:test"))
+                    choices.selected[L"mouse:test"] = {DeviceKind::Mouse, L"Test mouse"};
+            });
+            popup.add([&] {
+                if (!choices.selected.erase(L"port:test"))
+                    choices.selected[L"port:test"] = {DeviceKind::Port, L"Test port"};
+            });
+        };
+        populate();
+        check(!popup.begin(), "duplicate callback cannot replace open popup actions");
+        auto clicked = popup.finish(1000);
+        check(static_cast<bool>(clicked), "click survives rejected nested popup");
+        clicked();
+        check(choices.selected.size() == 1 && choices.selected.contains(L"mouse:test"),
+              "first click selects only requested device");
+        check(!popup.finish(1000), "completed popup cannot dispatch twice");
+        populate();
+        popup.finish(1001)();
+        auto savedChoices = parseSettings(serializeSettings(choices));
+        check(savedChoices && savedChoices->selected.size() == 2 &&
+                  savedChoices->selected.contains(L"port:test"),
+              "cross category choices survive config roundtrip");
+        populate();
+        check(!popup.finish(0) && choices.selected.size() == 2, "cancel preserves selections");
+        populate();
+        popup.finish(1000)();
+        populate();
+        popup.finish(1001)();
+        check(choices.selected.empty(), "last unchecked choice restores auto mode");
+        check(trayContextEvent(true, MAKELPARAM(WM_CONTEXTMENU, 1)) &&
+                  !trayContextEvent(true, MAKELPARAM(WM_RBUTTONUP, 1)),
+              "version 4 uses context event only");
+        check(trayContextEvent(false, WM_RBUTTONUP) && !trayContextEvent(false, WM_CONTEXTMENU),
+              "legacy tray uses right button release only");
         std::cout << "All core tests passed\n";
         return 0;
     } catch (const std::exception &e) {
