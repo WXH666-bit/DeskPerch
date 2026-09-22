@@ -96,7 +96,8 @@ void identity(Device &d, DEVINST node) {
         node = parent;
     }
     auto n = lower(d.name);
-    d.receiver = n.find(L"receiver") != std::wstring::npos || n.find(L"接收器") != std::wstring::npos;
+    d.receiver = n.find(L"receiver") != std::wstring::npos || n.find(L"接收器") != std::wstring::npos ||
+                 n.find(L"dongle") != std::wstring::npos || n.find(L"2.4g") != std::wstring::npos;
     if (d.receiver)
         d.transport = L"无线接收器";
     else if (d.transport.empty() && d.root.starts_with(L"usb\\"))
@@ -124,19 +125,27 @@ bool interfaces(const GUID &guid, const std::function<void(const std::wstring &,
 }
 Inventory enumerateInputs() {
     Inventory r;
+    bool inaccessible = false;
+    std::map<std::wstring, std::vector<std::wstring>> related;
     GUID hid{};
     HidD_GetHidGuid(&hid);
     r.ok = interfaces(hid, [&](const std::wstring &path, SP_DEVINFO_DATA &info) {
         Handle h(CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0,
                              nullptr));
-        if (!h)
+        if (!h) {
+            inaccessible = true;
             return;
+        }
         HIDD_ATTRIBUTES attr{sizeof(attr)};
-        if (!HidD_GetAttributes(h.get(), &attr))
+        if (!HidD_GetAttributes(h.get(), &attr)) {
+            inaccessible = true;
             return;
+        }
         PHIDP_PREPARSED_DATA prep = nullptr;
-        if (!HidD_GetPreparsedData(h.get(), &prep))
+        if (!HidD_GetPreparsedData(h.get(), &prep)) {
+            inaccessible = true;
             return;
+        }
         HIDP_CAPS caps{};
         auto status = HidP_GetCaps(prep, &caps);
         HidD_FreePreparsedData(prep);
@@ -157,6 +166,8 @@ Inventory enumerateInputs() {
         bool physical = d.root.starts_with(L"usb\\vid_") || d.root.starts_with(L"acpi\\") || d.bluetooth;
         if (!physical)
             return;
+        // Battery feature reports may live in a different top-level collection.
+        related[d.root].push_back(d.path);
         if (caps.UsagePage >= 0xff00 && d.vendor == 0x046d)
             r.controls.push_back(d);
         if (caps.UsagePage != 1)
@@ -203,11 +214,17 @@ Inventory enumerateInputs() {
     std::erase_if(r.mice, excludeInternal);
     std::erase_if(r.keyboards, excludeInternal);
     std::erase_if(r.controls, [](const Device &d) { return d.internal; });
+    for (auto &d : r.mice)
+        d.batteryPaths = related[d.root];
     // A gaming mouse exposes keyboard usages for its buttons, not a second keyboard.
     std::erase_if(r.keyboards, [&](const Device &k) {
         // Shared receivers can contain a real keyboard. Suppress only the
         // verified mouse receiver or a wired mouse's extra keyboard collection.
-        if (k.receiver && !(k.vendor == 0x046d && k.product == 0xc547))
+        auto label = lower(k.name);
+        if (!(k.vendor == 0x046d && k.product == 0xc547) &&
+            batteryKind(k, Reading::unavailable()) != BatteryKind::None &&
+            (k.receiver ||
+             (label.find(L"mouse") == std::wstring::npos && label.find(L"鼠标") == std::wstring::npos)))
             return false;
         return std::any_of(r.mice.begin(), r.mice.end(), [&](const Device &m) { return m.root == k.root; });
     });
@@ -227,6 +244,7 @@ Inventory enumerateInputs() {
     };
     std::stable_sort(r.keyboards.begin(), r.keyboards.end(),
                      [&](const Device &a, const Device &b) { return keyboardRank(a) < keyboardRank(b); });
+    r.ok = r.ok && !inaccessible;
     return r;
 }
 std::vector<Display> enumerateDisplays(bool &ok, std::set<std::wstring> *excluded) {
@@ -331,6 +349,9 @@ std::vector<Port> enumeratePorts(bool &ok) {
                                : State::Unavailable)
                         : State::Unavailable;
             port.connected = queried && p->ConnectionStatus == DeviceConnected;
+            // A hub is a grouping of its downstream ports, not an occupied peripheral row.
+            if (port.connected && p->DeviceIsHub)
+                continue;
             std::vector<BYTE> props(4096, 0);
             auto cp = reinterpret_cast<PUSB_PORT_CONNECTOR_PROPERTIES>(props.data());
             cp->ConnectionIndex = index;
@@ -394,10 +415,11 @@ std::vector<Port> enumeratePorts(bool &ok) {
         p.name = p.name.substr(0, p.name.find(L'|'));
         p.companion.clear();
     }
-    ok = ok && (!anyFailure || !result.empty());
+    ok = ok && !anyFailure;
     return result;
 }
-Reading standardBattery(const Device &d) {
+static Reading singleBattery(const Device &d) {
+    Reading unsupported = Reading::unavailable(State::Unavailable, L"HID capabilities unavailable");
     if (!d.path.empty()) {
         Handle h(CreateFileW(d.path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0,
                              nullptr));
@@ -405,6 +427,8 @@ Reading standardBattery(const Device &d) {
             PHIDP_PREPARSED_DATA prep = nullptr;
             if (HidD_GetPreparsedData(h.get(), &prep)) {
                 HIDP_CAPS caps{};
+                if (HidP_GetCaps(prep, &caps) == HIDP_STATUS_SUCCESS)
+                    unsupported = Reading::unavailable(State::Unsupported, L"no standard battery feature");
                 if (HidP_GetCaps(prep, &caps) == HIDP_STATUS_SUCCESS && caps.FeatureReportByteLength &&
                     caps.FeatureReportByteLength <= 4096) {
                     USHORT count = caps.NumberFeatureValueCaps;
@@ -426,7 +450,8 @@ Reading standardBattery(const Device &d) {
                                 HidP_GetUsageValue(HidP_Feature, 6, v.LinkCollection, 0x20, &value, prep,
                                                    report.data(), static_cast<ULONG>(report.size())) ==
                                     HIDP_STATUS_SUCCESS &&
-                                value <= 100;
+                                hidBatteryPercent(v.UsagePage, 0x20, v.LogicalMin, v.LogicalMax, value)
+                                    .has_value();
                             HidD_FreePreparsedData(prep);
                             return valid ? Reading::valid(std::to_wstring(value) + L"%",
                                                           L"HID Battery Strength", 180000, value <= 15)
@@ -471,182 +496,337 @@ Reading standardBattery(const Device &d) {
                     auto hr = BluetoothGATTGetCharacteristicValue(
                         h.get(), &ch, static_cast<ULONG>(buffer.size()), v, &required,
                         BLUETOOTH_GATT_FLAG_FORCE_READ_FROM_DEVICE);
-                    answer = SUCCEEDED(hr) && v->DataSize == 1 && v->Data[0] <= 100
-                                 ? Reading::valid(std::to_wstring(v->Data[0]) + L"%", L"Bluetooth BAS 0x2A19",
-                                                  180000, v->Data[0] <= 15)
-                                 : Reading::unavailable(State::Unavailable, L"Bluetooth BAS");
+                    answer =
+                        SUCCEEDED(hr) && v->DataSize == 1 && batteryPercent(std::span(v->Data, 1)).has_value()
+                            ? Reading::valid(std::to_wstring(v->Data[0]) + L"%", L"Bluetooth BAS 0x2A19",
+                                             180000, v->Data[0] <= 15)
+                            : Reading::unavailable(State::Unavailable, L"Bluetooth BAS");
                     return;
                 }
         });
         return answer;
     }
-    return Reading::unavailable(State::Unsupported, L"device capabilities");
+    return unsupported;
+}
+Reading standardBattery(const Device &d) {
+    auto answer = singleBattery(d);
+    if (answer.state == State::Valid)
+        return answer;
+    for (const auto &path : d.batteryPaths) {
+        if (path == d.path)
+            continue;
+        Device collection = d;
+        collection.path = path;
+        collection.bluetooth = false;
+        auto candidate = singleBattery(collection);
+        if (candidate.state == State::Valid)
+            return candidate;
+        if (candidate.state == State::Unavailable)
+            answer = candidate;
+    }
+    return answer;
+}
+static Reading inputConnection(const Device &d) {
+    auto instance = d.root;
+    DEVINST node = 0;
+    auto cr = CM_Locate_DevNodeW(&node, instance.data(), CM_LOCATE_DEVNODE_NORMAL);
+    if (cr == CR_NO_SUCH_DEVNODE)
+        return Reading::unavailable(State::Disconnected, L"PnP");
+    ULONG flags = 0, problem = 0;
+    if (cr != CR_SUCCESS || CM_Get_DevNode_Status(&flags, &problem, node, 0) != CR_SUCCESS ||
+        !(flags & DN_STARTED) || (flags & DN_HAS_PROBLEM))
+        return Reading::unavailable(State::Unavailable, L"PnP");
+    if (d.receiver || d.bluetooth)
+        return Reading::valid(L"状态未知", L"receiver/pairing presence, not peripheral presence");
+    return Reading::valid(L"已连接 · USB", L"PnP external HID");
 }
 void DeviceService::stop() {
+    SetEvent(stop_.get());
+    SetEvent(wake_.get());
+    ready_.notify_all();
     if (worker_.joinable()) {
-        SetEvent(stop_.get());
         CancelSynchronousIo(worker_.native_handle());
         worker_.join();
     }
+    for (auto &thread : collectors_)
+        if (thread.joinable()) {
+            CancelSynchronousIo(thread.native_handle());
+            thread.join();
+        }
 }
 void DeviceService::configure(const Settings &s, bool active, bool rescan) {
     std::lock_guard lock(mutex_);
-    bool deviceChanged = s.mouse != config_.mouse || s.keyboard != config_.keyboard;
-    refresh_ |= deviceChanged || (!active_ && active);
-    rescan_ |= rescan || deviceChanged || (!active_ && active);
+    const bool changed = s.selected != config_.selected || active != active_;
+    if (changed || rescan) {
+        ++epoch_;
+        for (auto &job : jobs_)
+            pending_.erase(job.device.root);
+        jobs_.clear();
+        for (auto &[id, d] : latest_.devices)
+            if (d.kind == DeviceKind::Mouse)
+                d.battery = d.dpi = Reading::unavailable();
+    }
+    rescan_ |= rescan || changed;
     config_ = s;
     active_ = active;
     SetEvent(wake_.get());
+    ready_.notify_all();
 }
 void DeviceService::run() {
     Inventory inventory;
-    Snapshot out;
-    std::unique_ptr<LogitechMouse> logi;
-    std::wstring logiRoot;
-    uint64_t lastScan = 0, lastBattery = 0, lastConnect = 0;
-    Reading otherBattery;
-    for (;;) {
-        if (WaitForSingleObject(stop_.get(), 0) == WAIT_OBJECT_0)
-            break;
+    std::vector<Display> displays;
+    std::vector<Port> ports;
+    std::set<std::wstring> excluded;
+    bool displaysOk = false, portsOk = false;
+    uint64_t scanned = 0;
+    size_t cursor = 0;
+    std::map<std::wstring, std::shared_ptr<RootContext>> contexts;
+    while (WaitForSingleObject(stop_.get(), 0) != WAIT_OBJECT_0) {
+        bool active, rescan;
+        uint64_t epoch;
         Settings config;
-        bool active, rescan, refresh;
+        Snapshot out;
         {
             std::lock_guard lock(mutex_);
-            config = config_;
             active = active_;
             rescan = std::exchange(rescan_, false);
-            refresh = std::exchange(refresh_, false);
+            epoch = epoch_;
+            config = config_;
+            out = latest_;
         }
         if (active || rescan) {
-            try {
-                // PnP may recreate the same device path after a rapid unplug/replug.
-                // Existing handles then refer to the removed PDO and must be reopened.
-                if (rescan) {
-                    logi.reset();
-                    lastConnect = lastBattery = 0;
-                }
-                if (rescan || !lastScan || now() - lastScan >= 30000) {
+            if (rescan || !scanned || now() - scanned >= 30000) {
+                try {
                     inventory = enumerateInputs();
-                    out.mice = inventory.mice;
-                    out.keyboards = inventory.keyboards;
-                    out.inventoryOk = inventory.ok;
-                    out.excludedDevices = inventory.excluded;
-                    try {
-                        out.displays = enumerateDisplays(out.displaysOk, &out.excludedDevices);
-                    } catch (...) {
-                        out.displaysOk = false;
-                    }
-                    try {
-                        out.ports = enumeratePorts(out.portsOk);
-                    } catch (...) {
-                        out.portsOk = false;
-                    }
-                    lastScan = out.inventoryAt = now();
+                } catch (...) {
+                    inventory.ok = false;
                 }
-                // Hidden widgets refresh inventory only on explicit events/menu requests.
-                // They never keep old numeric readings current or poll device telemetry.
-                if (!active) {
-                    out.battery = out.dpi = out.keyboard = Reading::unavailable();
-                } else {
-                    auto select = [](const std::vector<Device> &list,
-                                     const std::wstring &id) -> const Device * {
-                        if (id.empty())
-                            return list.empty() ? nullptr : &list.front();
-                        auto it = std::find_if(list.begin(), list.end(), [&](auto &d) { return d.id == id; });
-                        return it == list.end() ? nullptr : &*it;
-                    };
-                    if (out.excludedDevices.contains(config.mouse))
-                        config.mouse.clear();
-                    if (out.excludedDevices.contains(config.keyboard))
-                        config.keyboard.clear();
-                    auto mouse = select(inventory.mice, config.mouse);
-                    auto keyboard = select(inventory.keyboards, config.keyboard);
-                    out.selectedMouse = mouse ? mouse->id : config.mouse;
-                    out.selectedKeyboard = keyboard ? keyboard->id : config.keyboard;
-                    auto missingState = [&](const std::wstring &id) {
-                        if (!inventory.ok)
-                            return State::Unavailable;
-                        if (id.empty())
-                            return State::Disconnected;
-                        auto instance = id.substr(0, id.rfind(L'/'));
-                        DEVINST node = 0;
-                        auto result = CM_Locate_DevNodeW(&node, instance.data(), CM_LOCATE_DEVNODE_NORMAL);
-                        return result == CR_NO_SUCH_DEVNODE ? State::Disconnected : State::Unavailable;
-                    };
-                    if (!mouse) {
-                        out.battery = out.dpi = Reading::unavailable(missingState(config.mouse), L"PnP");
-                        out.mouseName = L"鼠标";
-                        logi.reset();
-                        logiRoot.clear();
-                    } else if (!mouse->operational) {
-                        out.battery = out.dpi =
-                            Reading::unavailable(State::Unavailable, L"PnP device not started");
-                        out.mouseName = mouse->name;
-                        logi.reset();
-                        lastConnect = 0;
-                    } else {
-                        out.mouseName = mouse->name;
-                        if (logiRoot != mouse->root) {
-                            logi.reset();
-                            logiRoot = mouse->root;
-                            lastConnect = lastBattery = 0;
-                        }
-                        if (mouse->vendor == 0x046d && !logi &&
-                            (!lastConnect || now() - lastConnect >= 30000 || refresh)) {
-                            auto candidate = std::make_unique<LogitechMouse>();
-                            if (candidate->connect(inventory.controls, mouse->root, stop_.get()))
-                                logi = std::move(candidate);
-                            lastConnect = now();
-                        }
-                        if (logi) {
-                            bool responding = logi->poll(out.battery, out.dpi, refresh);
-                            out.mouseName = logi->name();
-                            for (auto &m : out.mice)
-                                if (m.id == mouse->id)
-                                    m.name = out.mouseName;
-                            if (!responding && now() - lastConnect >= 30000)
-                                logi.reset();
-                        } else {
-                            if (mouse->vendor == 0x046d) {
-                                out.battery = out.dpi = Reading::unavailable(
-                                    State::Unavailable, L"HID++ device did not answer capability discovery");
-                            } else {
-                                if (refresh || !lastBattery || now() - lastBattery >= 60000) {
-                                    otherBattery = standardBattery(*mouse);
-                                    lastBattery = now();
-                                }
-                                out.battery = otherBattery;
-                                out.dpi =
-                                    Reading::unavailable(State::Unsupported, L"no verified DPI protocol");
-                            }
-                        }
-                    }
-                    if (!keyboard)
-                        out.keyboard = Reading::unavailable(missingState(config.keyboard), L"PnP");
-                    else if (!keyboard->operational)
-                        out.keyboard = Reading::unavailable(State::Unavailable, L"PnP device not started");
-                    else if (keyboard->receiver || keyboard->bluetooth)
-                        out.keyboard =
-                            Reading::valid(L"状态未知", L"receiver/paired-device presence only", 15000, true);
-                    else
-                        out.keyboard = Reading::valid(
-                            L"已连接" + (keyboard->transport.empty() ? L"" : L" · " + keyboard->transport),
-                            L"PnP physical keyboard", 15000);
+                excluded = inventory.excluded;
+                try {
+                    displays = enumerateDisplays(displaysOk, &excluded);
+                } catch (...) {
+                    displaysOk = false;
                 }
-            } catch (...) {
-                out.battery = out.dpi = out.keyboard = Reading::unavailable();
+                try {
+                    ports = enumeratePorts(portsOk);
+                } catch (...) {
+                    portsOk = false;
+                }
+                scanned = now();
+            }
+            std::map<std::wstring, DeviceStatus> catalog;
+            for (const auto &mouse : inventory.mice) {
+                bool expanded = false;
+                for (const auto &[id, prior] : out.devices)
+                    if (prior.kind == DeviceKind::Mouse && prior.root == mouse.root) {
+                        auto d = prior;
+                        if (!active || rescan)
+                            d.battery = d.dpi = Reading::unavailable();
+                        catalog[id] = d;
+                        expanded = true;
+                    }
+                if (!expanded) {
+                    DeviceStatus d;
+                    d.id = L"mouse:" + mouse.id;
+                    d.name = mouse.name;
+                    d.root = mouse.root;
+                    d.connection = inputConnection(mouse);
+                    catalog[d.id] = std::move(d);
+                }
+            }
+            for (const auto &keyboard : inventory.keyboards) {
+                DeviceStatus d;
+                d.kind = DeviceKind::Keyboard;
+                d.id = L"keyboard:" + keyboard.id;
+                d.name = keyboard.name;
+                d.root = keyboard.root;
+                d.connection = inputConnection(keyboard);
+                catalog[d.id] = std::move(d);
+            }
+            for (const auto &screen : displays) {
+                DeviceStatus d;
+                d.kind = DeviceKind::Display;
+                d.id = L"display:" + screen.id;
+                d.name = screen.name;
+                d.connection = !displaysOk ? Reading::unavailable()
+                               : !screen.connected
+                                   ? Reading::unavailable(State::Disconnected)
+                                   : Reading::valid(screen.enabled ? L"已启用" : L"已连接，未启用",
+                                                    L"QueryDisplayConfig", 60000);
+                d.connection.sampled = scanned;
+                catalog[d.id] = std::move(d);
+            }
+            for (const auto &port : ports) {
+                DeviceStatus d;
+                d.kind = DeviceKind::Port;
+                d.id = L"port:" + port.id;
+                d.name = port.name;
+                d.autoVisible = port.connected;
+                d.connection = port.state != State::Valid ? Reading::unavailable()
+                               : port.connected
+                                   ? Reading::valid(L"已连接", L"USB hub port", 60000)
+                                   : Reading::unavailable(State::Disconnected, L"USB port empty");
+                d.connection.sampled = scanned;
+                catalog[d.id] = std::move(d);
             }
             {
                 std::lock_guard lock(mutex_);
-                latest_ = out;
+                if (epoch == epoch_) {
+                    // Preserve worker results that arrived during the directory scan.
+                    if (!rescan && active) {
+                        for (const auto &mouse : inventory.mice) {
+                            bool fresh = std::any_of(
+                                latest_.devices.begin(), latest_.devices.end(), [&](const auto &e) {
+                                    return e.second.kind == DeviceKind::Mouse && e.second.root == mouse.root;
+                                });
+                            if (!fresh)
+                                continue;
+                            std::erase_if(catalog, [&](const auto &e) {
+                                return e.second.kind == DeviceKind::Mouse && e.second.root == mouse.root;
+                            });
+                            for (const auto &[id, d] : latest_.devices)
+                                if (d.kind == DeviceKind::Mouse && d.root == mouse.root)
+                                    catalog[id] = d;
+                        }
+                    }
+                    latest_.devices = std::move(catalog);
+                    latest_.inventoryOk = inventory.ok;
+                    latest_.displaysOk = displaysOk;
+                    latest_.portsOk = portsOk;
+                    latest_.inventoryAt = scanned;
+                    latest_.excludedDevices = excluded;
+                    latest_.mice = inventory.mice;
+                    latest_.keyboards = inventory.keyboards;
+                    latest_.displays = displays;
+                    latest_.ports = ports;
+                    std::erase_if(contexts, [&](auto &entry) {
+                        return std::none_of(inventory.mice.begin(), inventory.mice.end(),
+                                            [&](auto &m) { return m.root == entry.first; });
+                    });
+                    for (size_t i = 0; active && i < inventory.mice.size() && jobs_.size() < 32; ++i) {
+                        auto &mouse = inventory.mice[(cursor + i) % inventory.mice.size()];
+                        bool wanted =
+                            config.selected.empty() ||
+                            std::any_of(config.selected.begin(), config.selected.end(), [&](auto &entry) {
+                                return entry.second.kind == DeviceKind::Mouse &&
+                                       entry.first.starts_with(L"mouse:" + mouse.root + L"/");
+                            });
+                        if (!wanted || pending_.contains(mouse.root))
+                            continue;
+                        auto &ctx = contexts[mouse.root];
+                        if (!ctx || ctx->epoch != epoch) {
+                            ctx = std::make_shared<RootContext>();
+                            ctx->epoch = epoch;
+                        }
+                        jobs_.push_back({mouse, inventory.controls, epoch, ctx});
+                        pending_.insert(mouse.root);
+                    }
+                    if (!inventory.mice.empty())
+                        cursor = (cursor + 32) % inventory.mice.size();
+                }
             }
+            ready_.notify_all();
             if (target_)
                 PostMessageW(target_, updatedMessage, 0, 0);
         }
-        HANDLE events[] = {stop_.get(), wake_.get()};
-        auto result = WaitForMultipleObjects(2, events, FALSE, active ? 5000 : INFINITE);
-        if (result == WAIT_OBJECT_0)
+        HANDLE waits[] = {stop_.get(), wake_.get()};
+        if (WaitForMultipleObjects(2, waits, FALSE, active ? 5000 : INFINITE) == WAIT_OBJECT_0)
             break;
+    }
+}
+void DeviceService::collect() {
+    while (true) {
+        Job job;
+        {
+            std::unique_lock lock(mutex_);
+            ready_.wait(
+                lock, [&] { return WaitForSingleObject(stop_.get(), 0) == WAIT_OBJECT_0 || !jobs_.empty(); });
+            if (WaitForSingleObject(stop_.get(), 0) == WAIT_OBJECT_0)
+                return;
+            job = std::move(jobs_.front());
+            jobs_.pop_front();
+        }
+        std::vector<DeviceStatus> results;
+        auto &ctx = *job.context;
+        auto &mouse = job.device;
+        auto cancelled = [&] {
+            std::lock_guard lock(mutex_);
+            return !active_ || epoch_ != job.epoch || WaitForSingleObject(stop_.get(), 0) == WAIT_OBJECT_0;
+        };
+        try {
+            auto connection = inputConnection(mouse);
+            if (!cancelled() && mouse.vendor == 0x046d && mouse.operational &&
+                connection.state != State::Disconnected &&
+                (!ctx.discovered || now() - ctx.discovered >= 30000)) {
+                if (!ctx.channel)
+                    ctx.channel = std::make_shared<HidChannel>();
+                for (unsigned slot : {1u, 2u, 3u, 4u, 5u, 6u, 255u}) {
+                    if (cancelled())
+                        break;
+                    if (slot == 255 && !ctx.mice.empty())
+                        continue;
+                    if (ctx.mice.contains(slot))
+                        continue;
+                    auto candidate = std::make_unique<LogitechMouse>();
+                    if (candidate->connect(job.controls, mouse.root, stop_.get(), slot, ctx.channel))
+                        ctx.mice[slot] = std::move(candidate);
+                }
+                ctx.discovered = now();
+            }
+            for (auto &[slot, logi] : ctx.mice) {
+                if (cancelled())
+                    break;
+                DeviceStatus d;
+                d.id = L"mouse:" + mouse.root +
+                       (slot == 1 || slot == 255 ? L"/mouse" : L"/slot/" + std::to_wstring(slot));
+                d.name = logi->name();
+                d.root = mouse.root;
+                if (connection.state == State::Disconnected)
+                    d.battery = d.dpi = d.connection = connection;
+                else {
+                    bool ok = logi->poll(d.battery, d.dpi, false);
+                    d.connection = ok ? Reading::valid(L"已连接", L"HID++ ping") : Reading::unavailable();
+                    d.power = batteryKind(mouse, d.battery);
+                }
+                results.push_back(std::move(d));
+            }
+            if (results.empty() && !cancelled()) {
+                DeviceStatus d;
+                d.id = L"mouse:" + mouse.id;
+                d.name = mouse.name;
+                d.root = mouse.root;
+                d.connection = connection;
+                d.dpi = Reading::unavailable(State::Unsupported, L"no verified DPI protocol");
+                if (connection.state == State::Disconnected || connection.state == State::Unavailable)
+                    d.battery = d.dpi = connection;
+                else {
+                    if (!ctx.batteryAt || now() - ctx.batteryAt >= 60000) {
+                        ctx.battery = standardBattery(mouse);
+                        ctx.batteryAt = now();
+                    }
+                    d.battery = ctx.battery;
+                    d.power = batteryKind(mouse, d.battery);
+                    if (mouse.vendor == 0x046d &&
+                        std::any_of(job.controls.begin(), job.controls.end(),
+                                    [&](const auto &control) { return control.root == mouse.root; }))
+                        d.dpi = Reading::unavailable(State::Unavailable, L"HID++ discovery unavailable");
+                }
+                results.push_back(std::move(d));
+            }
+        } catch (...) {
+            DeviceStatus d;
+            d.id = L"mouse:" + mouse.id;
+            d.name = mouse.name;
+            d.root = mouse.root;
+            results.push_back(std::move(d));
+        }
+        {
+            std::lock_guard lock(mutex_);
+            pending_.erase(mouse.root);
+            if (publishMouseResults(latest_, mouse.root, std::move(results), active_, epoch_, job.epoch) &&
+                target_)
+                PostMessageW(target_, updatedMessage, 0, 0);
+        }
     }
 }
 } // namespace dp

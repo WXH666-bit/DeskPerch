@@ -6,7 +6,7 @@
 namespace dp {
 std::string serializeSettings(const Settings &s) {
     std::ostringstream o;
-    o << "DeskPerch 2\n"
+    o << "DeskPerch 3\n"
       << s.compact << ' ' << s.locked << ' ' << s.visible << ' ' << s.positioned << ' ' << s.allDisplays
       << ' ' << s.x << ' ' << s.y << '\n';
     for (auto *p : {&s.monitor, &s.mouse, &s.keyboard})
@@ -17,6 +17,10 @@ std::string serializeSettings(const Settings &s) {
             o << std::quoted(utf8(p)) << '\n';
     }
     o << s.background << '\n';
+    o << s.selected.size() << '\n';
+    for (const auto &[id, choice] : s.selected)
+        o << std::quoted(utf8(id)) << ' ' << static_cast<int>(choice.kind) << ' '
+          << std::quoted(utf8(choice.name)) << '\n';
     return o.str();
 }
 std::optional<Settings> parseSettings(std::string_view text) {
@@ -26,7 +30,7 @@ std::optional<Settings> parseSettings(std::string_view text) {
     std::string name;
     int version = 0;
     Settings s;
-    if (!(in >> name >> version) || name != "DeskPerch" || (version != 1 && version != 2))
+    if (!(in >> name >> version) || name != "DeskPerch" || version < 1 || version > 3)
         return {};
     if (!(in >> s.compact >> s.locked >> s.visible >> s.positioned >> s.allDisplays >> s.x >> s.y) ||
         std::abs(static_cast<int64_t>(s.x)) > 100000 || std::abs(static_cast<int64_t>(s.y)) > 100000)
@@ -53,10 +57,33 @@ std::optional<Settings> parseSettings(std::string_view text) {
             v->insert(b);
         }
     }
-    if (version == 2 && (!(in >> s.background) || s.background < 0 || s.background > 2))
+    if (version >= 2 && (!(in >> s.background) || s.background < 0 || s.background > 2))
         return {};
     if (s.background == 0)
         s.background = 2; // Retired smoked background; keep all other preferences.
+    if (version == 3) {
+        size_t count = 0;
+        if (!(in >> count) || count > 512)
+            return {};
+        for (size_t i = 0; i < count; ++i) {
+            std::string id, label;
+            int kind = -1;
+            if (!(in >> std::quoted(id) >> kind >> std::quoted(label)) || id.empty() || id.size() > 8192 ||
+                label.size() > 8192 || kind < 0 || kind > 3)
+                return {};
+            auto key = wide(id), title = wide(label);
+            if (key.empty() || (!label.empty() && title.empty()) ||
+                !s.selected.emplace(key, Selection{static_cast<DeviceKind>(kind), title}).second)
+                return {};
+        }
+    }
+    // Old versions persisted auto-picked devices as if they were explicit selections.
+    // Reset only attention filters; appearance, position and lifecycle preferences survive.
+    s.mouse.clear();
+    s.keyboard.clear();
+    s.ports.clear();
+    s.displays.clear();
+    s.allDisplays = true;
     in >> std::ws;
     if (!in.eof())
         return {};

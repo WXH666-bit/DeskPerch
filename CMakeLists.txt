@@ -18,3 +18,7 @@ add_executable(DeskPerchTests tests/tests.cpp)
 target_link_libraries(DeskPerchTests PRIVATE deskperch_core)
 add_test(NAME core COMMAND DeskPerchTests)
 install(TARGETS DeskPerch RUNTIME DESTINATION .)
+
+add_executable(DeskPerchLayoutTests tests/layout.cpp src/render.cpp)
+target_link_libraries(DeskPerchLayoutTests PRIVATE deskperch_core gdiplus)
+add_test(NAME layout COMMAND DeskPerchLayoutTests)

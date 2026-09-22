@@ -159,7 +159,7 @@ HidReply HidChannel::request(uint8_t d, uint8_t f, uint8_t function, std::span<c
 }
 std::optional<uint8_t> LogitechMouse::feature(uint16_t id) {
     const uint8_t args[] = {static_cast<uint8_t>(id >> 8), static_cast<uint8_t>(id), 0};
-    auto r = channel_.request(slot_, 0, 0, args);
+    auto r = channel_->request(slot_, 0, 0, args);
     if (!r.ok || r.data.empty())
         return {};
     return r.data[0];
@@ -169,7 +169,7 @@ void LogitechMouse::discoverCapabilities() {
         auto ext = feature(0x2202);
         if (ext && *ext) {
             const uint8_t sensor = 0;
-            auto caps = channel_.request(slot_, *ext, 1, std::span(&sensor, 1));
+            auto caps = channel_->request(slot_, *ext, 1, std::span(&sensor, 1));
             if (caps.ok && caps.data.size() > 2) {
                 dpiFeature_ = *ext;
                 extended_ = true;
@@ -188,7 +188,7 @@ void LogitechMouse::discoverCapabilities() {
     if (batteryCapability_ == State::Unavailable) {
         auto unified = feature(0x1004);
         if (unified && *unified) {
-            auto caps = channel_.request(slot_, *unified, 0);
+            auto caps = channel_->request(slot_, *unified, 0);
             if (caps.ok && caps.data.size() > 1) {
                 batteryFeature_ = *unified;
                 batteryId_ = 0x1004;
@@ -207,7 +207,10 @@ void LogitechMouse::discoverCapabilities() {
         }
     }
 }
-bool LogitechMouse::connect(const std::vector<Device> &controls, const std::wstring &root, HANDLE stop) {
+bool LogitechMouse::connect(const std::vector<Device> &controls, const std::wstring &root, HANDLE stop,
+                            unsigned requestedSlot, std::shared_ptr<HidChannel> shared) {
+    if (shared)
+        channel_ = shared;
     name_.clear();
     batteryFeature_ = dpiFeature_ = nameFeature_ = 0;
     batteryRead_ = 0;
@@ -219,13 +222,15 @@ bool LogitechMouse::connect(const std::vector<Device> &controls, const std::wstr
             continue;
         auto shortIt = std::find_if(controls.begin(), controls.end(),
                                     [&](const Device &c) { return c.root == d.root && c.outputLength == 7; });
-        if (!channel_.open(d, stop, shortIt == controls.end() ? nullptr : &*shortIt))
+        if (!channel_->opened() && !channel_->open(d, stop, shortIt == controls.end() ? nullptr : &*shortIt))
             continue;
         for (unsigned slot : {1u, 2u, 3u, 4u, 5u, 6u, 255u}) {
+            if (requestedSlot && slot != requestedSlot)
+                continue;
             if (stop && WaitForSingleObject(stop, 0) == WAIT_OBJECT_0)
                 return false;
             const uint8_t ping[] = {0, 0, 0x5a};
-            auto r = channel_.request(static_cast<uint8_t>(slot), 0, 1, ping, slot == 1 ? 1200 : 300);
+            auto r = channel_->request(static_cast<uint8_t>(slot), 0, 1, ping, slot == 1 ? 1200 : 300);
             if (!r.ok || r.data.size() < 3 || r.data[0] < 2 || r.data[2] != 0x5a)
                 continue;
             slot_ = static_cast<uint8_t>(slot);
@@ -233,16 +238,16 @@ bool LogitechMouse::connect(const std::vector<Device> &controls, const std::wstr
             if (!nf || !*nf)
                 continue;
             nameFeature_ = *nf;
-            auto type = channel_.request(slot_, nameFeature_, 2);
+            auto type = channel_->request(slot_, nameFeature_, 2);
             if (!type.ok || type.data.empty() || type.data[0] != 3)
                 continue;
-            auto len = channel_.request(slot_, nameFeature_, 0);
+            auto len = channel_->request(slot_, nameFeature_, 0);
             std::string text;
             if (len.ok && !len.data.empty() && len.data[0] > 0 && len.data[0] <= 128) {
                 unsigned length = len.data[0];
                 while (text.size() < length) {
                     uint8_t at = static_cast<uint8_t>(text.size());
-                    auto chunk = channel_.request(slot_, nameFeature_, 1, std::span(&at, 1));
+                    auto chunk = channel_->request(slot_, nameFeature_, 1, std::span(&at, 1));
                     if (!chunk.ok || chunk.data.empty())
                         break;
                     size_t n = std::min<size_t>(chunk.data.size(), length - text.size());
@@ -257,13 +262,14 @@ bool LogitechMouse::connect(const std::vector<Device> &controls, const std::wstr
             control_ = d;
             return true;
         }
-        channel_.close();
+        if (!shared)
+            channel_->close();
     }
     return false;
 }
 bool LogitechMouse::poll(Reading &battery, Reading &dpi, bool refreshBattery) {
     const uint8_t ping[] = {0, 0, 0xa6};
-    auto live = channel_.request(slot_, 0, 1, ping, 1200);
+    auto live = channel_->request(slot_, 0, 1, ping, 1200);
     if (!live.ok || live.data.size() < 3 || live.data[2] != 0xa6) {
         battery_ = battery = Reading::unavailable(State::Unavailable, L"HID++ ping");
         dpi = Reading::unavailable(State::Unavailable, L"HID++ ping");
@@ -273,7 +279,7 @@ bool LogitechMouse::poll(Reading &battery, Reading &dpi, bool refreshBattery) {
     discoverCapabilities();
     if (dpiFeature_) {
         const uint8_t sensor = 0;
-        auto r = channel_.request(slot_, dpiFeature_, extended_ ? 5 : 2, std::span(&sensor, 1));
+        auto r = channel_->request(slot_, dpiFeature_, extended_ ? 5 : 2, std::span(&sensor, 1));
         auto v = r.ok ? decodeDpi(r.data, extended_, separateY_) : std::nullopt;
         dpi =
             v ? Reading::valid(std::to_wstring(v->x) + (v->x == v->y ? L"" : L" × " + std::to_wstring(v->y)),
@@ -284,7 +290,7 @@ bool LogitechMouse::poll(Reading &battery, Reading &dpi, bool refreshBattery) {
     if (!batteryFeature_ || !batteryPercent_) {
         battery_ = Reading::unavailable(batteryCapability_, L"HID++ battery percentage");
     } else if (refreshBattery || !batteryRead_ || now() - batteryRead_ >= 60000) {
-        auto r = channel_.request(slot_, batteryFeature_, batteryId_ == 0x1004 ? 1 : 0);
+        auto r = channel_->request(slot_, batteryFeature_, batteryId_ == 0x1004 ? 1 : 0);
         batteryRead_ = now();
         if (r.ok && r.data.size() >= 3 && r.data[0] <= 100 && (batteryId_ == 0x1004 || r.data[0] != 0)) {
             auto v = std::to_wstring(r.data[0]) + L"%";

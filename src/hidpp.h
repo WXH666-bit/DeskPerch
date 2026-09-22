@@ -21,6 +21,7 @@ class HidChannel {
   public:
     HidChannel() = default;
     bool open(const Device &, HANDLE stop, const Device *companion = nullptr);
+    bool opened() const { return static_cast<bool>(file_); }
     HidReply request(uint8_t device, uint8_t feature, uint8_t function, std::span<const uint8_t> args = {},
                      DWORD timeout = 300);
     void close() {
@@ -29,7 +30,7 @@ class HidChannel {
     }
 };
 class LogitechMouse {
-    HidChannel channel_;
+    std::shared_ptr<HidChannel> channel_ = std::make_shared<HidChannel>();
     Device control_;
     uint8_t slot_ = 0, nameFeature_ = 0, batteryFeature_ = 0, dpiFeature_ = 0;
     uint16_t batteryId_ = 0;
@@ -42,7 +43,8 @@ class LogitechMouse {
     void discoverCapabilities();
 
   public:
-    bool connect(const std::vector<Device> &controls, const std::wstring &root, HANDLE stop);
+    bool connect(const std::vector<Device> &controls, const std::wstring &root, HANDLE stop,
+                 unsigned requestedSlot = 0, std::shared_ptr<HidChannel> shared = {});
     bool poll(Reading &battery, Reading &dpi, bool refreshBattery);
     const std::wstring &name() const { return name_; }
     const std::wstring &root() const { return control_.root; }

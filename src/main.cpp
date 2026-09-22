@@ -37,6 +37,18 @@ class App {
     POINT dragCursor_{}, dragOrigin_{};
     UINT dpi_ = 96;
     unsigned retrySeconds_ = 1;
+    int scroll_ = 0;
+    CardContent content(std::optional<POINT> position = {}) {
+        auto c = contentFor(snapshot_, settings_);
+        auto mon = monitorForPoint(
+            position.value_or(tile_ ? tilePosition() : restorePosition(settings_, {256, 48})));
+        c.maxWidth = std::max(1, std::min(420, MulDiv(mon.work.right - mon.work.left, 96, mon.dpi)));
+        c.maxHeight = std::max(32, std::min(600, MulDiv(mon.work.bottom - mon.work.top, 96, mon.dpi)));
+        scroll_ =
+            std::clamp(scroll_, 0, std::max(0, static_cast<int>(c.rows.size()) * 32 + 16 - c.maxHeight));
+        c.scroll = scroll_;
+        return c;
+    }
     std::vector<std::function<void()>> menuActions_;
     bool active() const {
         return settings_.visible && !sessionLocked_ && !suspended_ && desktop_.valid() && tile_;
@@ -126,30 +138,34 @@ class App {
     void reposition(bool reset) {
         if (!tile_)
             return;
-        auto content = contentFor(snapshot_, settings_);
-        auto approx = restorePosition(settings_, {256, 172}, reset);
+        auto approx = restorePosition(settings_, {256, 48}, reset);
+        auto content = this->content(approx);
         dpi_ = monitorForPoint(approx).dpi;
         auto size = cardSize(content, dpi_);
         POINT pos = restorePosition(settings_, size, reset);
         dpi_ = monitorForPoint(pos).dpi;
         drawCard(tile_, content, pos, dpi_);
         drawn_ = content;
-        RECT r{};
-        GetWindowRect(tile_, &r);
-        rememberPosition(settings_, r);
+        // Temporary loading/error text can be wider than the final card. Never
+        // replace the user's anchor with the resulting temporary screen clamp.
+        if (reset || !settings_.positioned) {
+            RECT r{};
+            GetWindowRect(tile_, &r);
+            rememberPosition(settings_, r);
+        }
     }
     void redraw(bool force = false) {
-        if (!active())
+        if (!active() || dragging_)
             return;
-        auto content = contentFor(snapshot_, settings_);
+        auto content = this->content();
         if (!force && drawn_ && *drawn_ == content)
             return;
-        auto pos = tilePosition();
-        auto monitor = monitorForPoint(pos);
-        dpi_ = monitor.dpi;
+        auto preferred = restorePosition(settings_, {0, 0});
+        dpi_ = monitorForPoint(preferred).dpi;
+        content = this->content(preferred);
         auto size = cardSize(content, dpi_);
-        auto rect = clampRect({pos.x, pos.y, pos.x + size.cx, pos.y + size.cy}, monitor.work);
-        drawCard(tile_, content, {rect.left, rect.top}, dpi_);
+        auto pos = restorePosition(settings_, size);
+        drawCard(tile_, content, pos, dpi_);
         drawn_ = content;
     }
     void settingsChanged(bool rescan = false) {
@@ -171,12 +187,6 @@ class App {
         case Compact:
             settings_.compact = !settings_.compact;
             settingsChanged();
-            if (tile_) {
-                RECT r{};
-                GetWindowRect(tile_, &r);
-                rememberPosition(settings_, r);
-                persist();
-            }
             break;
         case Lock:
             settings_.locked = !settings_.locked;
@@ -189,7 +199,8 @@ class App {
         case Visibility:
             settings_.visible = !settings_.visible;
             if (settings_.visible) {
-                snapshot_.battery = snapshot_.dpi = snapshot_.keyboard = Reading::unavailable();
+                for (auto &[deviceId, d] : snapshot_.devices)
+                    d.battery = d.dpi = d.connection = Reading::unavailable();
                 createTile();
                 if (tile_)
                     ShowWindow(tile_, SW_SHOWNOACTIVATE);
@@ -240,33 +251,36 @@ class App {
             SetMenuItemInfoW(m, id, FALSE, &info);
         }
     }
-    void deviceMenu(HMENU m, bool mouse) {
-        auto &list = mouse ? snapshot_.mice : snapshot_.keyboards;
-        auto selected = mouse ? settings_.mouse : settings_.keyboard;
-        for (auto &d : list) {
-            auto id = d.id;
-            item(
-                m, d.name + (d.transport.empty() ? L"" : L" · " + d.transport), selected == id,
-                [this, id, mouse] {
-                    if (mouse) {
-                        settings_.mouse = id;
-                        snapshot_.battery = snapshot_.dpi = Reading::unavailable();
-                    } else {
-                        settings_.keyboard = id;
-                        snapshot_.keyboard = Reading::unavailable();
-                    }
-                },
-                true);
+    void deviceMenu(HMENU m, DeviceKind kind) {
+        auto candidates = snapshot_.devices;
+        for (const auto &d : visibleDevices(snapshot_, settings_, false))
+            if (!candidates.contains(d.id))
+                candidates[d.id] = d;
+        Snapshot directory = snapshot_;
+        directory.devices = candidates;
+        Settings all;
+        for (const auto &[id, d] : candidates)
+            all.selected[id] = {d.kind, d.name};
+        for (const auto &d : visibleDevices(directory, all, false))
+            candidates[d.id].name = d.name;
+        unsigned count = 0;
+        for (const auto &[id, d] : candidates) {
+            if (d.kind != kind)
+                continue;
+            ++count;
+            item(m, d.name + L" · " + d.connection.text(now()), settings_.selected.contains(id),
+                 [this, id, d] {
+                     if (!settings_.selected.erase(id))
+                         settings_.selected[id] = {
+                             d.kind, snapshot_.devices.contains(id) ? snapshot_.devices.at(id).name : d.name};
+                     scroll_ = 0;
+                 });
         }
-        if (!selected.empty() &&
-            std::none_of(list.begin(), list.end(), [&](auto &d) { return d.id == selected; }))
-            AppendMenuW(m, MF_STRING | MF_DISABLED | MF_CHECKED, 0, L"已关注的设备 · 暂不可用");
-        if (list.empty())
-            AppendMenuW(m, MF_STRING | MF_DISABLED, 0, L"未发现可选择的实体设备");
+        if (!count)
+            AppendMenuW(m, MF_STRING | MF_DISABLED, 0, L"未发现可选择的外接设备");
     }
     void menu() {
         sync(true);
-        const bool stale = !snapshot_.inventoryAt || now() - snapshot_.inventoryAt > 60000;
         menuActions_.clear();
         HMENU root = CreatePopupMenu();
         AppendMenuW(root, MF_STRING | (startupEnabled() ? MF_CHECKED : 0), Startup, L"开机自启动");
@@ -282,55 +296,15 @@ class App {
         AppendMenuW(root, MF_SEPARATOR, 0, nullptr);
         HMENU devices = CreatePopupMenu(), mouse = CreatePopupMenu(), keyboard = CreatePopupMenu(),
               displays = CreatePopupMenu(), usb = CreatePopupMenu();
-        deviceMenu(mouse, true);
-        deviceMenu(keyboard, false);
-        item(displays, L"全部外接显示器", settings_.allDisplays, [this] {
-            settings_.allDisplays = true;
-            settings_.displays.clear();
+        item(devices, L"自动显示已连接设备", settings_.selected.empty(), [this] {
+            settings_.selected.clear();
+            scroll_ = 0;
         });
-        AppendMenuW(displays, MF_SEPARATOR, 0, nullptr);
-        unsigned number = 0;
-        for (auto &d : snapshot_.displays) {
-            auto id = d.id;
-            auto name = std::to_wstring(++number) + L" · " + d.name + L" · " +
-                        (stale || !snapshot_.displaysOk ? L"状态未知"
-                         : d.enabled                    ? L"已启用"
-                         : d.connected                  ? L"已连接，未启用"
-                                                        : L"未连接");
-            item(displays, name, settings_.allDisplays || settings_.displays.contains(id), [this, id] {
-                if (settings_.allDisplays) {
-                    settings_.displays.clear();
-                    for (auto &d : snapshot_.displays)
-                        settings_.displays.insert(d.id);
-                    settings_.allDisplays = false;
-                }
-                if (!settings_.displays.erase(id))
-                    settings_.displays.insert(id);
-            });
-        }
-        for (auto &id : settings_.displays)
-            if (std::none_of(snapshot_.displays.begin(), snapshot_.displays.end(),
-                             [&](auto &d) { return d.id == id; }))
-                item(displays, L"已关注显示器 · 暂不可用", true,
-                     [this, id] { settings_.displays.erase(id); });
-        for (auto &p : snapshot_.ports) {
-            auto id = p.id;
-            item(usb,
-                 p.name + L" · " +
-                     (stale || !snapshot_.portsOk || p.state == State::Unavailable ? L"状态未知"
-                      : p.connected                                                ? L"已连接"
-                                                                                   : L"空闲"),
-                 settings_.ports.contains(id), [this, id] {
-                     if (!settings_.ports.erase(id))
-                         settings_.ports.insert(id);
-                 });
-        }
-        for (auto &id : settings_.ports)
-            if (std::none_of(snapshot_.ports.begin(), snapshot_.ports.end(),
-                             [&](auto &p) { return p.id == id; }))
-                item(usb, L"已关注接口 · 暂不可用", true, [this, id] { settings_.ports.erase(id); });
-        if (snapshot_.ports.empty())
-            AppendMenuW(usb, MF_STRING | MF_DISABLED, 0, L"接口信息暂不可用");
+        AppendMenuW(devices, MF_SEPARATOR, 0, nullptr);
+        deviceMenu(mouse, DeviceKind::Mouse);
+        deviceMenu(keyboard, DeviceKind::Keyboard);
+        deviceMenu(displays, DeviceKind::Display);
+        deviceMenu(usb, DeviceKind::Port);
         AppendMenuW(devices, MF_POPUP, reinterpret_cast<UINT_PTR>(mouse), L"鼠标");
         AppendMenuW(devices, MF_POPUP, reinterpret_cast<UINT_PTR>(keyboard), L"键盘");
         AppendMenuW(devices, MF_POPUP, reinterpret_cast<UINT_PTR>(displays), L"显示器");
@@ -363,7 +337,16 @@ class App {
                 EndPaint(h, &ps);
                 return 0;
             }
+            case WM_MOUSEWHEEL:
+                scroll_ -= GET_WHEEL_DELTA_WPARAM(w) / WHEEL_DELTA * 96;
+                redraw(true);
+                return 0;
             case WM_LBUTTONDOWN:
+                if (drawn_ && GET_X_LPARAM(l) >= cardSize(*drawn_, dpi_).cx - MulDiv(12, dpi_, 96)) {
+                    scroll_ += GET_Y_LPARAM(l) < cardSize(*drawn_, dpi_).cy / 2 ? -160 : 160;
+                    redraw(true);
+                    return 0;
+                }
                 if (!settings_.locked) {
                     dragging_ = true;
                     GetCursorPos(&dragCursor_);
@@ -379,7 +362,7 @@ class App {
                                    dragOrigin_.y + cursor.y - dragCursor_.y};
                     auto mon = monitorForPoint(cursor);
                     dpi_ = mon.dpi;
-                    auto content = contentFor(snapshot_, settings_);
+                    auto content = this->content(cursor);
                     auto size = cardSize(content, dpi_);
                     auto rect = clampRect({p.x, p.y, p.x + size.cx, p.y + size.cy}, mon.work);
                     drawCard(tile_, content, {rect.left, rect.top}, dpi_);
@@ -431,14 +414,13 @@ class App {
             std::filesystem::path output(path);
             if (!output.is_absolute())
                 return FALSE;
-            if (!drawCard(nullptr, contentFor(snapshot_, settings_), {}, dpi_, output))
+            if (!drawCard(nullptr, content(), {}, dpi_, output))
                 return FALSE;
             output.replace_extension(L"txt");
             std::ofstream report(output);
-            report << "mouse=" << utf8(snapshot_.mouseName) << "\n";
-            for (auto *r : {&snapshot_.battery, &snapshot_.dpi, &snapshot_.keyboard})
-                report << utf8(r->text(now())) << " | " << utf8(r->source)
-                       << " | age_ms=" << (now() - r->sampled) << "\n";
+            for (const auto &[id, d] : snapshot_.devices)
+                report << utf8(d.name) << " | " << utf8(d.connection.text(now())) << " | "
+                       << utf8(batteryText(d, now())) << " | " << utf8(d.dpi.text(now())) << "\n";
             return TRUE;
         }
         case trayMessage:
@@ -447,30 +429,17 @@ class App {
             return 0;
         case DeviceService::updatedMessage: {
             snapshot_ = devices_->snapshot();
-            bool changed = false;
-            if (snapshot_.excludedDevices.contains(settings_.mouse)) {
-                settings_.mouse.clear();
-                changed = true;
+            bool namesChanged = false;
+            for (auto &[key, choice] : settings_.selected) {
+                auto found = snapshot_.devices.find(key);
+                if (found != snapshot_.devices.end() && choice.name != found->second.name) {
+                    choice.name = found->second.name;
+                    namesChanged = true;
+                }
             }
-            if (snapshot_.excludedDevices.contains(settings_.keyboard)) {
-                settings_.keyboard.clear();
-                changed = true;
-            }
-            for (const auto &id : snapshot_.excludedDevices)
-                changed = settings_.displays.erase(id) != 0 || changed;
-            if (settings_.mouse.empty() && !snapshot_.selectedMouse.empty()) {
-                settings_.mouse = snapshot_.selectedMouse;
-                changed = true;
-            }
-            if (settings_.keyboard.empty() && !snapshot_.selectedKeyboard.empty()) {
-                settings_.keyboard = snapshot_.selectedKeyboard;
-                changed = true;
-            }
-            if (changed) {
+            if (namesChanged)
                 persist();
-                sync();
-            }
-            tooltip(L"DeskPerch" + (snapshot_.mouseName.empty() ? L"" : L" · " + snapshot_.mouseName));
+            tooltip(L"DeskPerch");
             redraw();
             return 0;
         }
@@ -510,7 +479,8 @@ class App {
                     if (tile_)
                         ShowWindow(tile_, SW_HIDE);
                 } else {
-                    snapshot_.battery = snapshot_.dpi = snapshot_.keyboard = Reading::unavailable();
+                    for (auto &[deviceId, d] : snapshot_.devices)
+                        d.battery = d.dpi = d.connection = Reading::unavailable();
                     createTile();
                     if (tile_ && settings_.visible)
                         ShowWindow(tile_, SW_SHOWNOACTIVATE);
@@ -525,7 +495,8 @@ class App {
                 sync();
             } else if (w == PBT_APMRESUMEAUTOMATIC || w == PBT_APMRESUMESUSPEND) {
                 suspended_ = false;
-                snapshot_.battery = snapshot_.dpi = snapshot_.keyboard = Reading::unavailable();
+                for (auto &[deviceId, d] : snapshot_.devices)
+                    d.battery = d.dpi = d.connection = Reading::unavailable();
                 createTile();
                 sync(true);
                 redraw(true);

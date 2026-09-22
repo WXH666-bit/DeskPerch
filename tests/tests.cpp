@@ -30,18 +30,25 @@ int main() {
         s.compact = true;
         s.mouse = L"USB\\设备\"/123";
         s.ports = {L"Hub1/1", L"Hub2/2"};
+        s.selected[L"mouse:one"] = {DeviceKind::Mouse, L"Mouse A"};
+        s.selected[L"keyboard:two"] = {DeviceKind::Keyboard, L"Keyboard B"};
         s.x = -42;
         s.background = 2;
         auto copy = parseSettings(serializeSettings(s));
-        check(copy && copy->mouse == s.mouse && copy->ports == s.ports && copy->x == -42 && copy->compact,
+        check(copy && copy->selected == s.selected && copy->mouse.empty() && copy->ports.empty() &&
+                  copy->x == -42 && copy->compact,
               "settings roundtrip");
         check(copy && copy->background == 2, "background persists");
-        auto legacy = serializeSettings(s);
-        legacy.replace(0, 11, "DeskPerch 1");
-        legacy.resize(legacy.size() - 2);
+        auto legacy = std::string("DeskPerch 2\n1 1 0 1 0 -42 24\n\"monitor\"\n\"old mouse\"\n\"old "
+                                  "keyboard\"\n1\n\"port\"\n0\n1\n");
         auto migrated = parseSettings(legacy);
-        check(migrated && migrated->background == 2 && migrated->mouse == s.mouse,
-              "legacy settings use pale white without losing device selection");
+        check(migrated && migrated->background == 1 && migrated->selected.empty() &&
+                  migrated->mouse.empty() && migrated->locked && !migrated->visible && migrated->compact &&
+                  migrated->x == -42,
+              "v2 resets selections while preserving preferences");
+        legacy[10] = '1';
+        legacy.resize(legacy.size() - 2);
+        check(parseSettings(legacy) && parseSettings(legacy)->selected.empty(), "v1 migration");
         check(Settings{}.background == 2, "first launch defaults to pale white");
         s.background = 1;
         check(parseSettings(serializeSettings(s))->background == 1, "explicit transparent choice persists");
@@ -49,9 +56,9 @@ int main() {
         check(parseSettings(serializeSettings(s))->background == 2,
               "retired smoked choice migrates to white");
         s.background = 2;
-        auto badBackground = serializeSettings(s);
-        badBackground[badBackground.size() - 2] = '9';
-        check(!parseSettings(badBackground), "invalid background rejected");
+        s.background = 9;
+        check(!parseSettings(serializeSettings(s)), "invalid background rejected");
+        s.background = 2;
         check(!parseSettings("DeskPerch 9"), "unknown config version");
         check(!parseSettings(serializeSettings(s) + "garbage"), "trailing corrupted config");
         check(!parseSettings(std::string(131073, 'x')), "oversized config");
@@ -95,6 +102,91 @@ int main() {
         snap.displays[0].connected = false;
         check(displaySummary(snap, cfg).text(now()).find(L"断开") != std::wstring::npos,
               "confirmed disconnected display");
+        Snapshot many;
+        many.inventoryOk = many.displaysOk = true;
+        DeviceStatus mouse;
+        mouse.id = L"mouse:a";
+        mouse.name = L"Same";
+        mouse.connection = Reading::valid(L"已连接", L"test");
+        mouse.battery = Reading::valid(L"62%", L"test", 180000);
+        mouse.dpi = Reading::valid(L"1600", L"test");
+        many.devices[mouse.id] = mouse;
+        mouse.id = L"mouse:b";
+        mouse.dpi = Reading::unavailable();
+        many.devices[mouse.id] = mouse;
+        DeviceStatus port;
+        port.id = L"port:a";
+        port.kind = DeviceKind::Port;
+        port.connection = Reading::unavailable(State::Disconnected);
+        many.devices[port.id] = port;
+        Settings attention;
+        auto rows = visibleDevices(many, attention, false);
+        check(rows.size() == 2 && rows[0].name != rows[1].name,
+              "auto excludes idle ports and distinguishes mice");
+        check(rows[0].dpi.state == State::Valid && rows[1].dpi.state == State::Unavailable,
+              "one failure does not poison another mouse");
+        attention.selected[port.id] = {DeviceKind::Port, L"saved port"};
+        check(visibleDevices(many, attention, false).size() == 1 &&
+                  visibleDevices(many, attention, true).empty(),
+              "first selection is global; compact never auto-adds mouse");
+        attention.selected[L"mouse:a"] = {DeviceKind::Mouse, L"saved mouse"};
+        check(visibleDevices(many, attention, false).size() == 2, "cross category multi selection");
+        many.devices.erase(L"mouse:a");
+        rows = visibleDevices(many, attention, true);
+        check(rows.size() == 1 && rows[0].name == L"saved mouse" &&
+                  rows[0].connection.state == State::Disconnected,
+              "missing selected mouse retains name");
+        many.inventoryOk = false;
+        check(visibleDevices(many, attention, true)[0].connection.state == State::Unavailable,
+              "enumeration failure is not unplug");
+        attention.selected.clear();
+        check(visibleDevices(many, attention, false).size() == 1, "clear selections restores auto");
+        mouse.power = BatteryKind::None;
+        check(batteryText(mouse, now()) == L"-", "confirmed batteryless");
+        mouse.power = BatteryKind::Present;
+        check(batteryText(mouse, now()) == L"62%", "rechargeable retains actual battery");
+        check(batteryPercent(std::array<uint8_t, 1>{0}) == 0u &&
+                  batteryPercent(std::array<uint8_t, 1>{100}) == 100u,
+              "BAS endpoints");
+        check(!batteryPercent(std::array<uint8_t, 1>{101}) &&
+                  !batteryPercent(std::array<uint8_t, 2>{50, 0}) && !batteryPercent({}),
+              "BAS rejects out of range, oversized and missing data");
+        Device wired;
+        wired.root = L"usb\\vid_1532";
+        wired.vendor = 0x1532;
+        wired.product = 0x006e;
+        check(batteryKind(wired, Reading::unavailable()) == BatteryKind::None, "documented wired model");
+        check(batteryKind(wired, Reading::valid(L"40%", L"HID")) == BatteryKind::Present,
+              "actual battery overrides catalog");
+        wired.product = 0x9999;
+        check(batteryKind(wired, Reading::unavailable()) == BatteryKind::Unknown,
+              "USB alone is not batteryless");
+        check(hidBatteryPercent(6, 0x20, 0, 100, 55) == 55u, "HID percentage feature");
+        check(!hidBatteryPercent(6, 0x20, 0, 4, 2) && !hidBatteryPercent(6, 0x20, 0, 100, 101) &&
+                  !hidBatteryPercent(1, 0x20, 0, 100, 50),
+              "reject levels, overflow, wrong usage page");
+        mouse.connection = Reading::unavailable();
+        check(batteryText(mouse, now()) == L"暂不可用", "connection failure suppresses previous battery");
+        mouse.connection = Reading::valid(L"状态未知", L"receiver");
+        mouse.battery = Reading::unavailable(State::Unsupported);
+        check(batteryText(mouse, now()) == L"状态未知", "receiver presence does not imply online");
+        Snapshot publication;
+        Device physical;
+        physical.root = L"root-a";
+        publication.mice.push_back(physical);
+        DeviceStatus fresh;
+        fresh.root = physical.root;
+        fresh.id = L"mouse:a";
+        fresh.dpi = Reading::valid(L"800", L"test");
+        check(!publishMouseResults(publication, physical.root, {fresh}, true, 2, 1),
+              "reject late generation");
+        check(!publishMouseResults(publication, physical.root, {fresh}, false, 2, 2), "reject while hidden");
+        check(publishMouseResults(publication, physical.root, {fresh}, true, 2, 2), "publish current result");
+        publication.mice.clear();
+        fresh.dpi = Reading::valid(L"9999", L"late");
+        check(!publishMouseResults(publication, physical.root, {fresh}, true, 2, 2) &&
+                  publication.devices.at(fresh.id).dpi.value == L"800",
+              "removed root cannot resurrect late data");
         std::cout << "All core tests passed\n";
         return 0;
     } catch (const std::exception &e) {

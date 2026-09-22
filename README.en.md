@@ -6,12 +6,12 @@
 
 A quiet, lightweight peripheral-status widget for the Windows desktop. Built with C++20, native Win32 and GDI+, with no installer, account, administrator privileges or additional runtime required.
 
-[Latest release](https://github.com/WXH666-bit/DeskPerch/releases/latest) · [Actions](https://github.com/WXH666-bit/DeskPerch/actions) · [Device support](docs/SUPPORT.md)
+[Latest release](https://github.com/WXH666-bit/DeskPerch/releases/latest) · [Actions](https://github.com/WXH666-bit/DeskPerch/actions) · [Device support](docs/SUPPORT.md) · [Validation record](docs/VALIDATION.md)
 
 ## Features
 
-- Full view: mouse battery, real DPI, selected USB ports, external displays and external keyboard status.
-- Compact view: battery and DPI only, in a container that shrinks to fit.
+- Full view: one row per external mouse (battery and real DPI), keyboard, display and USB port.
+- Compact view: battery and DPI per mouse, with names when multiple mice are shown. Long lists have wheel scrolling and a narrow scrollbar.
 - Hosted in Explorer's desktop icon view, below ordinary apps, without a taskbar button, Alt+Tab entry or automatic focus activation.
 - Recognized built-in keyboards, touchpads, integrated panels and internal USB ports are excluded.
 - Clear and pale-white backgrounds; pale white is the first-launch default, then the user's choice is restored. Dark text, bold values and adapted light outlines improve legibility.
@@ -24,7 +24,7 @@ No driver installation, hardware tuning, DPI modification, ads, telemetry or net
 
 Download the portable ZIP from Releases, extract it and run `DeskPerch.exe`. The standalone EXE also works. On first launch the widget appears near the upper-right corner of the primary monitor's work area.
 
-Right-click the system tray icon (possibly in the overflow area) for settings. Drag the widget while unlocked. Select USB ports of interest in the device submenu. Hide keeps the tray; Exit ends the process. Startup is off by default; after moving the EXE, toggle startup off/on to update the path.
+Right-click the system tray icon (possibly in the overflow area) for settings. Drag the widget while unlocked. No checked objects means automatic display of external peripherals and occupied external ports; idle ports and hub devices are hidden. The first check enters global manual mode: only checked objects are shown, across all categories. Uncheck the last object or choose “自动显示已连接设备” to restore automatic mode. Disconnected selections retain their names. Compact view never adds an unselected mouse. Hide keeps the tray; Exit ends the process. Startup is off by default; after moving the EXE, toggle startup off/on to update the path.
 
 Target: Windows 11 24H2/25H2 x64. Actual hardware testing has used Windows 11 25H2; other builds, wallpaper tools and monitor combinations need validation. The EXE is unsigned. The application UI is currently Chinese; documentation is bilingual.
 
@@ -39,6 +39,10 @@ Target: Windows 11 24H2/25H2 x64. Actual hardware testing has used Windows 11 25
 | 状态已过期 — Expired | An old reading is no longer presented as current |
 
 Unknown battery is never 0%; pointer speed or presets never replace real DPI. Enabled display paths do not imply physical power. USB port numbers may differ from case labels.
+
+Other brands use standard HID Feature / Bluetooth BAS percentage reports; unverified DPI protocols remain unsupported. Only positively identified batteryless wired models display `-`; USB attachment alone is not proof. See the support table.
+
+Configuration v3 migrates v1/v2 attention filters to automatic mode while keeping appearance, position, locking, visibility and layout. Subsequent starts restore multiple selections and offline names.
 
 Preferences are stored in `%LOCALAPPDATA%\DeskPerch\settings.dat`. No typed input, pointer movement, other app content or device-state history is recorded.
 

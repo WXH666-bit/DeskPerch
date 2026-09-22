@@ -1,6 +1,98 @@
 #include "model.h"
 #include <cwctype>
 namespace dp {
+BatteryKind batteryKind(const Device &d, const Reading &reading) {
+    if (reading.state == State::Valid)
+        return BatteryKind::Present;
+    // Positive model identification only; absence of a battery report proves nothing.
+    // Sources and verification limits are recorded in docs/SUPPORT.md.
+    if (!d.bluetooth && !d.receiver && d.root.starts_with(L"usb\\") &&
+        ((d.vendor == 0x046d && d.product == 0xc08b) ||
+         (d.vendor == 0x1532 && (d.product == 0x006e || d.product == 0x0098 || d.product == 0x0071))))
+        return BatteryKind::None;
+    return BatteryKind::Unknown;
+}
+std::optional<unsigned> hidBatteryPercent(unsigned page, unsigned usage, long minimum, long maximum,
+                                          unsigned value) {
+    if (page != 6 || usage != 0x20 || minimum != 0 || maximum != 100 || value > 100)
+        return {};
+    return value;
+}
+std::optional<unsigned> batteryPercent(std::span<const uint8_t> value) {
+    if (value.size() != 1 || value[0] > 100)
+        return {};
+    return value[0];
+}
+std::wstring batteryText(const DeviceStatus &d, uint64_t tick) {
+    if (d.connection.effective(tick) == State::Disconnected)
+        return L"未连接";
+    if (d.connection.effective(tick) == State::Unavailable || d.connection.effective(tick) == State::Expired)
+        return d.connection.text(tick);
+    if (d.connection.value == L"状态未知" && d.battery.effective(tick) != State::Valid)
+        return L"状态未知";
+    return d.power == BatteryKind::None ? L"-" : d.battery.text(tick);
+}
+bool publishMouseResults(Snapshot &snapshot, const std::wstring &root, std::vector<DeviceStatus> results,
+                         bool active, uint64_t currentGeneration, uint64_t resultGeneration) {
+    if (!active || currentGeneration != resultGeneration || results.empty() ||
+        std::none_of(snapshot.mice.begin(), snapshot.mice.end(),
+                     [&](const auto &d) { return d.root == root; }) ||
+        std::any_of(results.begin(), results.end(),
+                    [&](const auto &d) { return d.root != root || d.kind != DeviceKind::Mouse; }))
+        return false;
+    std::erase_if(snapshot.devices,
+                  [&](const auto &e) { return e.second.kind == DeviceKind::Mouse && e.second.root == root; });
+    for (auto &d : results) {
+        auto id = d.id;
+        snapshot.devices[id] = std::move(d);
+    }
+    return true;
+}
+std::vector<DeviceStatus> visibleDevices(const Snapshot &s, const Settings &c, bool compact) {
+    std::vector<DeviceStatus> rows;
+    for (const auto &[id, d] : s.devices) {
+        if (compact && d.kind != DeviceKind::Mouse)
+            continue;
+        if (!c.selected.empty() && !c.selected.contains(id))
+            continue;
+        if (c.selected.empty() && (!d.autoVisible || d.connection.effective(now()) == State::Disconnected))
+            continue;
+        rows.push_back(d);
+    }
+    for (const auto &[id, choice] : c.selected) {
+        if (s.devices.contains(id) || (compact && choice.kind != DeviceKind::Mouse))
+            continue;
+        bool known = choice.kind == DeviceKind::Display ? s.displaysOk : s.inventoryOk;
+        // A hub query can partially succeed; absence from that result is not proof of unplugging.
+        if (choice.kind == DeviceKind::Port)
+            known = s.portsOk;
+        DeviceStatus d;
+        d.id = id;
+        d.name = choice.name;
+        d.kind = choice.kind;
+        d.connection = Reading::unavailable(known ? State::Disconnected : State::Unavailable, L"inventory");
+        d.battery = d.dpi = d.connection;
+        rows.push_back(std::move(d));
+    }
+    std::sort(rows.begin(), rows.end(),
+              [](const auto &a, const auto &b) { return a.kind != b.kind ? a.kind < b.kind : a.id < b.id; });
+    // Identity-derived numbers do not shift when selection order changes.
+    std::map<std::pair<DeviceKind, std::wstring>, size_t> totals;
+    for (const auto &d : rows)
+        ++totals[{d.kind, d.name}];
+    for (auto &d : rows) {
+        auto key = std::make_pair(d.kind, d.name);
+        if (totals[key] > 1) {
+            uint32_t number = 2166136261u;
+            for (auto ch : d.id) {
+                number ^= static_cast<uint32_t>(ch);
+                number *= 16777619u;
+            }
+            d.name += L" #" + std::to_wstring(number);
+        }
+    }
+    return rows;
+}
 std::wstring wide(std::string_view v) {
     if (v.empty())
         return {};

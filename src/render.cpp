@@ -6,37 +6,41 @@ CardContent contentFor(const Snapshot &s, const Settings &c) {
     CardContent r;
     r.compact = c.compact;
     r.background = c.background;
-    auto readings =
-        std::array<Reading, 5>{s.battery, s.dpi, usbSummary(s, c), displaySummary(s, c), s.keyboard};
-    for (size_t i = 0; i < 5; ++i) {
-        r.values[i] = readings[i].text(now());
-        // Absence is ordinary status, not automatically an alert. Only an
-        // explicit, still-valid warning (for example low battery) gets color.
-        r.warning[i] = readings[i].warning && readings[i].effective(now()) == State::Valid;
+    auto devices = visibleDevices(s, c, c.compact);
+    for (const auto &d : devices) {
+        CardRow row;
+        row.name = c.compact && devices.size() == 1 ? L"鼠标" : d.name;
+        if (d.kind == DeviceKind::Mouse) {
+            auto reading = d.connection.effective(now()) == State::Disconnected ||
+                                   d.connection.effective(now()) == State::Unavailable ||
+                                   d.connection.effective(now()) == State::Expired
+                               ? d.connection
+                               : d.dpi;
+            auto value = reading.text(now());
+            bool numeric = !value.empty() && value.front() >= L'0' && value.front() <= L'9';
+            row.value = batteryText(d, now()) + L" · " + (numeric ? value + L" DPI" : L"DPI " + value);
+            row.warning = d.battery.warning && d.battery.effective(now()) == State::Valid;
+        } else
+            row.value = d.connection.text(now());
+        r.rows.push_back(std::move(row));
     }
+    if (r.rows.empty())
+        r.rows.push_back({L"", c.compact ? L"未关注鼠标" : L"未发现已连接外设"});
     return r;
-}
-std::wstring compactText(const CardContent &c) {
-    bool numeric = !c.values[1].empty() && c.values[1][0] >= L'0' && c.values[1][0] <= L'9';
-    return L"鼠标 " + c.values[0] + L"  ·  " + (numeric ? c.values[1] + L" DPI" : L"DPI " + c.values[1]);
 }
 SIZE cardSize(const CardContent &c, UINT dpi) {
     Bitmap b(1, 1, PixelFormat32bppPARGB);
     Graphics g(&b);
     Font f(L"Microsoft YaHei UI", 13, FontStyleBold, UnitPixel);
-    RectF bounds;
-    if (!c.compact) {
-        int width = 256;
-        for (auto &value : c.values) {
-            g.MeasureString(value.c_str(), -1, &f, PointF(0, 0), &bounds);
-            width = std::max(width, static_cast<int>(std::ceil(bounds.Width)) + 100);
-        }
-        return {MulDiv(std::min(width, 340), dpi, 96), MulDiv(172, dpi, 96)};
+    int width = 256;
+    for (const auto &row : c.rows) {
+        RectF bounds;
+        auto value = row.name + L"  " + row.value;
+        g.MeasureString(value.c_str(), -1, &f, PointF(0, 0), &bounds);
+        width = std::max(width, static_cast<int>(std::ceil(bounds.Width)) + 40);
     }
-    auto text = compactText(c);
-    g.MeasureString(text.c_str(), -1, &f, PointF(0, 0), &bounds);
-    return {MulDiv(std::clamp(static_cast<int>(std::ceil(bounds.Width)) + 32, 180, 380), dpi, 96),
-            MulDiv(40, dpi, 96)};
+    return {MulDiv(std::min(width, c.maxWidth), dpi, 96),
+            MulDiv(std::min(16 + static_cast<int>(c.rows.size()) * 32, c.maxHeight), dpi, 96)};
 }
 void rounded(GraphicsPath &p, REAL x, REAL y, REAL w, REAL h, REAL radius) {
     REAL d = radius * 2;
@@ -87,19 +91,30 @@ bool drawCard(HWND hwnd, const CardContent &c, POINT screen, UINT dpi, const std
         left.SetLineAlignment(StringAlignmentCenter);
         left.SetFormatFlags(StringFormatFlagsNoWrap);
         left.SetTrimming(StringTrimmingEllipsisCharacter);
-        if (c.compact) {
-            auto value = compactText(c);
-            RectF box(16, 0, w - 32, h - 2);
-            text(value, valueFont, box, left, c.warning[0] || c.warning[1] ? &warning : &normal);
-        } else {
-            const wchar_t *labels[] = {L"鼠标电量", L"鼠标 DPI", L"USB 接口", L"外接屏幕", L"外接键盘"};
-            StringFormat right(&left);
-            right.SetAlignment(StringAlignmentFar);
-            for (int i = 0; i < 5; ++i) {
-                RectF a(16, 14.0f + i * 28, 68, 28), b(82, 14.0f + i * 28, w - 98, 28);
-                text(labels[i], font, a, left, &label);
-                text(c.values[i], valueFont, b, right, c.warning[i] ? &warning : &normal);
-            }
+        StringFormat right(&left);
+        right.SetAlignment(StringAlignmentFar);
+        g.SetClip(RectF(12, 8, w - 24, h - 16));
+        for (size_t i = 0; i < c.rows.size(); ++i) {
+            REAL y = 8.0f + static_cast<REAL>(i * 32) - c.scroll;
+            if (y + 32 < 8 || y > h - 8)
+                continue;
+            const auto &row = c.rows[i];
+            RectF measured;
+            g.MeasureString(row.value.c_str(), -1, &valueFont, PointF(0, 0), &measured);
+            REAL valueWidth = std::min(w - 32, measured.Width + 4);
+            RectF a(16, y, std::max(0.0f, w - valueWidth - 44), 32);
+            RectF b(w - 20 - valueWidth, y, valueWidth, 32);
+            text(row.name, font, a, left, &label);
+            text(row.value, valueFont, b, right, row.warning ? &warning : &normal);
+        }
+        g.ResetClip();
+        REAL total = static_cast<REAL>(c.rows.size() * 32);
+        if (total > h - 16) {
+            REAL viewport = h - 16;
+            REAL thumb = std::max(18.0f, viewport * viewport / total);
+            SolidBrush scrollbar(Color(110, 90, 100, 115));
+            g.FillRectangle(&scrollbar, w - 7, 8 + (viewport - thumb) * c.scroll / (total - viewport), 3.0f,
+                            thumb);
         }
     }
     if (!png.empty()) {

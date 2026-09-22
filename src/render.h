@@ -3,11 +3,15 @@
 #include <objidl.h>
 #include <gdiplus.h>
 namespace dp {
+struct CardRow {
+    std::wstring name, value;
+    bool warning = false;
+    bool operator==(const CardRow &) const = default;
+};
 struct CardContent {
-    std::array<std::wstring, 5> values;
-    std::array<bool, 5> warning{};
+    std::vector<CardRow> rows;
     bool compact = false;
-    int background = 2;
+    int background = 2, maxWidth = 420, maxHeight = 600, scroll = 0;
     bool operator==(const CardContent &) const = default;
 };
 CardContent contentFor(const Snapshot &, const Settings &);
