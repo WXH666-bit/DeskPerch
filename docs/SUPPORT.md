@@ -6,7 +6,7 @@ The borrowed M8 MAX receiver (`A8A5:2255`, `LTM8 2.4G`) has been hardware-tested
 
 | Provider | Coverage |
 | --- | --- |
-| Logitech HID++ | Read-only device name, battery and active DPI. Tested with a LIGHTSPEED receiver and PRO X Wireless. Other models require verification. |
+| Logitech HID++ | Read-only device name, battery and active DPI. Tested with a LIGHTSPEED receiver and PRO X Wireless. This exact model has a conservative charging/reconnect anomaly guard; other models require verification. |
 | LANGTU M8 MAX | Exact verified 2.4G receiver only. Read-only percentage and active DPI; powered-off invalid configuration suppresses cached battery. Mouse keyboard collection is excluded. No write/configuration commands. |
 | DPI | `0x2201` and `0x2202`; the latter has parser tests but no corresponding hardware validation. Zero is not replaced with a preset. |
 | Battery | HID++ `0x1004` / `0x1000`, explicitly defined 0–100 HID Feature Reports and paired Bluetooth Battery Service. Standard HID/BLE need additional hardware testing. |
@@ -18,9 +18,13 @@ The borrowed M8 MAX receiver (`A8A5:2255`, `LTM8 2.4G`) has been hardware-tested
 
 Unsupported, unavailable, disconnected and expired readings are distinct. Per-slot mouse contexts and serialized requests on one shared receiver channel are implemented; multi-slot hardware validation is still pending. A device without a serial number may receive a different Windows identifier when moved to another USB port.
 
-设备事件合并刷新；可见时在线状态／DPI 每 5 秒查询，电量每 60 秒查询。隐藏、锁屏或休眠时停止主动轮询。DPI／在线状态有效期 15 秒，电量 180 秒；查询失败会移除旧数值。
+设备事件合并刷新；可见时在线状态／DPI 每 5 秒查询。已验证的 PRO X Wireless 每 5 秒查询 HID++ 电量与充电状态，其他设备电量每 60 秒查询。隐藏、锁屏或休眠时停止主动轮询。DPI／在线状态有效期 15 秒，电量 180 秒；查询失败会移除旧数值。
 
-Events trigger coalesced refreshes. While visible, online state/DPI are queried every 5 seconds and battery every 60 seconds. Polling pauses while hidden, locked or suspended. Online/DPI readings expire after 15 seconds and battery after 180 seconds; failures clear current values.
+Events trigger coalesced refreshes. While visible, online state/DPI are queried every 5 seconds. The verified PRO X Wireless reads HID++ battery/charging status every 5 seconds; other batteries remain on a 60-second cadence. Polling pauses while hidden, locked or suspended. Online/DPI readings expire after 15 seconds and battery after 180 seconds; failures clear current values.
+
+PRO X Wireless 曾在独立充电头供电、带电重启后直接上报 94%→50%，拔线后 51%，不充电再次重启后 96%。独立 HID++ 查询复现同一结果，因此无法将跳变后的数值视作已确认的真实容量。此型号 `0x1004` 在五分钟内相差至少 20 个百分点、离线后带电重连时突然大幅下降，或首次采样正在充电且无基准时，隐藏百分比并显示“电量待确认”；连续重复可疑数值不会解除。恢复需要接近原基准、明确满电，或之后检测离线并在未充电时重连，再取得三次间隔至少五秒、波动不超过两个百分点的有效报告。判断只在运行内存中，不是厂商校准，也不推广至其他型号。
+
+An independent HID++ query reproduced the PRO X Wireless charging/restart jump (94%→50%→51%→96%). For this exact model, an abrupt 20-point change within five minutes or a first sample while charging without a baseline hides the percentage as “电量待确认” until corroborated. Identical repeated suspect reports do not count as corroboration. This is an in-memory presentation safeguard, not a firmware correction or independent capacity measurement.
 
 ## 验证边界 / Validation limits
 

@@ -7,6 +7,22 @@ struct DpiValue {
     unsigned x = 0, y = 0;
 };
 std::optional<DpiValue> decodeDpi(std::span<const uint8_t> payload, bool extended, bool separateY);
+struct BatterySample {
+    unsigned percent = 0, level = 0, status = 0;
+    uint64_t sampled = 0;
+};
+std::optional<BatterySample> decodeHidppBattery(std::span<const uint8_t>, uint16_t featureId,
+                                                uint64_t sampled);
+class BatteryGuard {
+    std::optional<BatterySample> trusted_, candidate_;
+    uint64_t candidateAt_ = 0;
+    unsigned candidateCount_ = 0;
+    bool pending_ = false, offlineAfterPending_ = false, offlineBeforeSample_ = false;
+
+  public:
+    void offline();
+    Reading observe(const BatterySample &, bool protect);
+};
 struct HidReply {
     bool ok = false;
     unsigned error = 0;
@@ -38,6 +54,8 @@ class LogitechMouse {
     std::wstring name_;
     uint64_t batteryRead_ = 0;
     Reading battery_;
+    BatteryGuard batteryGuard_;
+    bool protectBattery_ = false;
     State dpiCapability_ = State::Unavailable, batteryCapability_ = State::Unavailable;
     std::optional<uint8_t> feature(uint16_t id);
     void discoverCapabilities();

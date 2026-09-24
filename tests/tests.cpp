@@ -28,6 +28,71 @@ int main() {
         check(v && v->x == 1600 && v->y == 3200, "separate XY DPI");
         dpi[1] = dpi[2] = 0;
         check(!decodeDpi(dpi, false, false), "no preset substitution");
+        auto sample = decodeHidppBattery(std::array<uint8_t, 4>{94, 8, 0, 0}, 0x1004, 1000);
+        check(sample && sample->percent == 94 && sample->level == 8 && sample->status == 0,
+              "0x1004 separates percent level and charging status");
+        check(!decodeHidppBattery(std::array<uint8_t, 2>{94, 8}, 0x1004, 1000) &&
+                  !decodeHidppBattery(std::array<uint8_t, 3>{101, 8, 0}, 0x1004, 1000) &&
+                  !decodeHidppBattery(std::array<uint8_t, 3>{94, 3, 0}, 0x1004, 1000) &&
+                  !decodeHidppBattery(std::array<uint8_t, 3>{94, 8, 5}, 0x1004, 1000),
+              "0x1004 rejects truncated, out of range, unknown level and error status");
+        check(decodeHidppBattery(std::array<uint8_t, 3>{50, 80, 1}, 0x1000, 1000) &&
+                  !decodeHidppBattery(std::array<uint8_t, 3>{0, 80, 1}, 0x1000, 1000) &&
+                  !decodeHidppBattery(std::array<uint8_t, 3>{50, 80, 1}, 0x1005, 1000),
+              "legacy battery uses its own valid percentage rules");
+        BatteryGuard guard;
+        check(guard.observe(*sample, true).value == L"94%", "unplugged baseline is trusted");
+        sample = decodeHidppBattery(std::array<uint8_t, 3>{94, 8, 1}, 0x1004, 2000);
+        check(guard.observe(*sample, true).value == L"94% · 充电中", "charging state refreshes");
+        guard.offline();
+        for (uint64_t tick : {3000ull, 8000ull, 13000ull}) {
+            sample = decodeHidppBattery(std::array<uint8_t, 3>{50, 4, 1}, 0x1004, tick);
+            check(guard.observe(*sample, true).value == L"电量待确认 · 充电中",
+                  "repeated 50 percent cannot clear anomaly");
+        }
+        sample = decodeHidppBattery(std::array<uint8_t, 3>{51, 8, 0}, 0x1004, 18000);
+        check(guard.observe(*sample, true).value == L"电量待确认", "unplugged 51 remains suspect");
+        guard.offline();
+        for (uint64_t tick : {23000ull, 28000ull}) {
+            sample = decodeHidppBattery(std::array<uint8_t, 3>{96, 8, 0}, 0x1004, tick);
+            check(guard.observe(*sample, true).value == L"电量待确认",
+                  "restart recovery requires three spaced replies");
+        }
+        sample = decodeHidppBattery(std::array<uint8_t, 3>{96, 8, 0}, 0x1004, 33000);
+        check(guard.observe(*sample, true).value == L"96%", "unplugged restart recovers after validation");
+        BatteryGuard coldCharging;
+        sample = decodeHidppBattery(std::array<uint8_t, 3>{50, 4, 1}, 0x1004, 1000);
+        check(coldCharging.observe(*sample, true).value == L"电量待确认 · 充电中",
+              "cold start during charging hides unverified percent");
+        BatteryGuard lowUnplugged;
+        sample->status = 0;
+        check(lowUnplugged.observe(*sample, true).value == L"50%",
+              "genuine low unplugged startup is not blacklisted");
+        BatteryGuard longCharge;
+        sample->percent = 94;
+        sample->sampled = 1000;
+        longCharge.observe(*sample, true);
+        longCharge.offline();
+        sample->percent = 50;
+        sample->status = 1;
+        sample->sampled = 601000;
+        check(longCharge.observe(*sample, true).value == L"电量待确认 · 充电中",
+              "charging restart after long power-off still checks abrupt drop");
+        BatteryGuard completed;
+        sample->percent = 70;
+        completed.observe(*sample, true);
+        sample->percent = 100;
+        sample->status = 3;
+        for (uint64_t tick : {6000ull, 11000ull, 16000ull}) {
+            sample->sampled = tick;
+            auto observed = completed.observe(*sample, true);
+            check(observed.value == (tick == 16000 ? L"100% · 已充满" : L"电量待确认"),
+                  "full battery recovery requires three spaced replies");
+        }
+        BatteryGuard anotherMouse;
+        sample->percent = 62;
+        sample->status = 0;
+        check(anotherMouse.observe(*sample, true).value == L"62%", "per mouse guards do not share state");
         Settings s;
         s.compact = true;
         s.mouse = L"USB\\设备\"/123";

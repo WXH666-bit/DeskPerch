@@ -24,6 +24,81 @@ std::optional<DpiValue> decodeDpi(std::span<const uint8_t> p, bool extended, boo
         return {};
     return DpiValue{x, y};
 }
+std::optional<BatterySample> decodeHidppBattery(std::span<const uint8_t> p, uint16_t featureId,
+                                                uint64_t sampled) {
+    if ((featureId != 0x1004 && featureId != 0x1000) || p.size() < 3 || p[0] > 100 ||
+        (featureId == 0x1000 && p[0] == 0) || p[2] > 4)
+        return {};
+    // 0x1004 byte 1 is an approximate level, not another percentage.
+    if (featureId == 0x1004 && p[1] != 0 && p[1] != 1 && p[1] != 2 && p[1] != 4 && p[1] != 8)
+        return {};
+    return BatterySample{p[0], p[1], p[2], sampled};
+}
+void BatteryGuard::offline() {
+    offlineBeforeSample_ = true;
+    if (pending_)
+        offlineAfterPending_ = true;
+    candidate_.reset();
+    candidateCount_ = 0;
+}
+Reading BatteryGuard::observe(const BatterySample &sample, bool protect) {
+    constexpr auto source = L"HID++ 0x1004";
+    auto reading = [&] {
+        std::wstring value = std::to_wstring(sample.percent) + L"%";
+        if (sample.status == 1 || sample.status == 2 || sample.status == 4)
+            value += L" · 充电中";
+        else if (sample.status == 3)
+            value += L" · 已充满";
+        return Reading::valid(value, source, 180000, sample.percent <= 15);
+    };
+    if (!protect) {
+        trusted_ = sample;
+        return reading();
+    }
+    const bool charging = sample.status == 1 || sample.status == 2 || sample.status == 4;
+    const bool afterOffline = std::exchange(offlineBeforeSample_, false);
+    const unsigned difference =
+        trusted_ ? (sample.percent > trusted_->percent ? sample.percent - trusted_->percent
+                                                       : trusted_->percent - sample.percent)
+                 : 0;
+    if (!pending_ &&
+        ((!trusted_ && charging) ||
+         (trusted_ && difference >= 20 &&
+          ((sample.sampled >= trusted_->sampled && sample.sampled - trusted_->sampled <= 300000) ||
+           (afterOffline && charging && sample.percent < trusted_->percent))))) {
+        pending_ = true;
+        offlineAfterPending_ = false;
+        candidate_.reset();
+        candidateCount_ = 0;
+    }
+    if (pending_) {
+        const bool nearBaseline =
+            trusted_ && (sample.percent > trusted_->percent ? sample.percent - trusted_->percent
+                                                            : trusted_->percent - sample.percent) <= 5;
+        const bool complete = sample.status == 3 && sample.percent == 100;
+        const bool recoveredOffline = offlineAfterPending_ && sample.status == 0;
+        if (nearBaseline || complete || recoveredOffline) {
+            const bool stable =
+                candidate_ && sample.sampled >= candidateAt_ + 5000 &&
+                (sample.percent > candidate_->percent ? sample.percent - candidate_->percent
+                                                      : candidate_->percent - sample.percent) <= 2;
+            candidateCount_ = stable ? candidateCount_ + 1 : 1;
+            candidate_ = sample;
+            candidateAt_ = sample.sampled;
+            if (candidateCount_ >= 3) {
+                pending_ = offlineAfterPending_ = false;
+                trusted_ = sample;
+                return reading();
+            }
+        } else {
+            candidate_.reset();
+            candidateCount_ = 0;
+        }
+        return Reading::valid(charging ? L"电量待确认 · 充电中" : L"电量待确认", source, 15000);
+    }
+    trusted_ = sample;
+    return reading();
+}
 bool HidChannel::open(const Device &d, HANDLE stop, const Device *companion) {
     file_.reset(CreateFileW(d.path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                             nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr));
@@ -260,6 +335,9 @@ bool LogitechMouse::connect(const std::vector<Device> &controls, const std::wstr
                 name_ = L"罗技鼠标";
             discoverCapabilities();
             control_ = d;
+            protectBattery_ = d.vendor == 0x046d && d.product == 0xc547 && name_ == L"PRO X Wireless" &&
+                              batteryId_ == 0x1004;
+            batteryGuard_ = BatteryGuard{};
             return true;
         }
         if (!shared)
@@ -271,6 +349,7 @@ bool LogitechMouse::poll(Reading &battery, Reading &dpi, bool refreshBattery) {
     const uint8_t ping[] = {0, 0, 0xa6};
     auto live = channel_->request(slot_, 0, 1, ping, 1200);
     if (!live.ok || live.data.size() < 3 || live.data[2] != 0xa6) {
+        batteryGuard_.offline();
         battery_ = battery = Reading::unavailable(State::Unavailable, L"HID++ ping");
         dpi = Reading::unavailable(State::Unavailable, L"HID++ ping");
         batteryRead_ = 0;
@@ -289,17 +368,23 @@ bool LogitechMouse::poll(Reading &battery, Reading &dpi, bool refreshBattery) {
         dpi = Reading::unavailable(dpiCapability_, L"HID++ feature discovery");
     if (!batteryFeature_ || !batteryPercent_) {
         battery_ = Reading::unavailable(batteryCapability_, L"HID++ battery percentage");
-    } else if (refreshBattery || !batteryRead_ || now() - batteryRead_ >= 60000) {
+    } else if (refreshBattery || !batteryRead_ || now() - batteryRead_ >= (protectBattery_ ? 5000 : 60000)) {
         auto r = channel_->request(slot_, batteryFeature_, batteryId_ == 0x1004 ? 1 : 0);
         batteryRead_ = now();
-        if (r.ok && r.data.size() >= 3 && r.data[0] <= 100 && (batteryId_ == 0x1004 || r.data[0] != 0)) {
-            auto v = std::to_wstring(r.data[0]) + L"%";
-            if (r.data[2] == 1 || r.data[2] == 2)
-                v += L" · 充电中";
-            battery_ = Reading::valid(v, batteryId_ == 0x1004 ? L"HID++ 0x1004" : L"HID++ 0x1000", 180000,
-                                      r.data[0] <= 15);
-        } else
+        auto sample = r.ok ? decodeHidppBattery(r.data, batteryId_, batteryRead_) : std::nullopt;
+        if (!sample)
             battery_ = Reading::unavailable(State::Unavailable, L"HID++ battery");
+        else if (protectBattery_)
+            battery_ = batteryGuard_.observe(*sample, true);
+        else {
+            std::wstring value = std::to_wstring(sample->percent) + L"%";
+            if (sample->status == 1 || sample->status == 2 || sample->status == 4)
+                value += L" · 充电中";
+            else if (sample->status == 3)
+                value += L" · 已充满";
+            battery_ = Reading::valid(value, batteryId_ == 0x1004 ? L"HID++ 0x1004" : L"HID++ 0x1000", 180000,
+                                      sample->percent <= 15);
+        }
     }
     battery = battery_;
     return true;

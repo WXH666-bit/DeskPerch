@@ -1,5 +1,15 @@
 # 多设备版本验证 / Multi-device validation
 
+## 后续：PRO X Wireless 充电电量异常保护（2026-09-24）
+
+独立只读 HID++ `0x1004` 采样复现：未充电 94%（状态 0）；插独立充电头后 94%（状态 1）；带电重启后连续约 22 秒 50%（状态 1）；拔线后 51%（状态 0）；断开充电再次重启后 96%（状态 0）。前后 5 秒读取均经过 ping 并按槽位、功能、软件 ID 匹配。该跳变来自设备回复，真实电池容量未独立测量。
+
+本机 Release 构建与 core/layout 测试通过；单元测试覆盖 `0x1004` 百分比／档位／充电状态、`0x1000` 独立解析、错误状态、94→50→51→96 的待确认与恢复、连续错误读数、长时间离线后带电重连、冷启动充电、正常低电量、满电及设备隔离。测试版开机未充电显示 96%，插线后约 7 秒抓取到“96% · 充电中”；测试期间重启应用并保留插线，显示“电量待确认 · 充电中”，符合无基准的保守规则。鼠标物理关机与重启后的测试版界面回归仍待实机操作完成。
+
+同一桌面场景约 30 秒、5 秒间隔闲置采样：旧 EXE 工作集 21.46 MiB、私有提交 4.85 MiB、整机归一化 CPU 0.0016%、句柄 261、线程 7；新 EXE 在罗技设备有效连接时为 21.04 MiB、4.71 MiB、0.0016%、句柄 212、线程 5。两次均为短时采样，系统状态和接收器发现阶段不同，不能单独证明长期资源水平不变。
+
+Independent HID++ read queries reproduced 94%→50%→51%→96% across charging and power transitions. Unit tests cover parsing and anomaly handling. A short local idle sample of the new binary showed no CPU or memory increase; long-term stability and remaining physical widget transitions are still to be checked.
+
 ## 后续：狼途 M8 MAX 实机适配（2026-09-22）
 
 借用鼠标通过 `A8A5:2255 / LTM8 2.4G` 接入。初次只读查询为 76%、2400 DPI；用户关闭底部电源后，接收器仍回复 75%，DPI 六档为全 FF，因此适配拒绝无效配置并撤下所有数值。用户开机切档后捕获 800 DPI，正式采集器随后读取 72%、1600 DPI。替换本机 EXE 后的实际挂件渲染为 79%、1600 DPI，无多余键盘行，配置文件保持不变。电量为固件上报值，开关机前后有波动，未作平滑或推算。
